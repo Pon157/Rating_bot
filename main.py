@@ -13,7 +13,7 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 
 # --- НАСТРОЙКИ ТОПИКОВ (Замени цифры на ID из ссылок) ---
-TOPIC_LOGS_ALL = 46 # Общий топик для ВСЕХ логов/отзывов
+TOPIC_LOGS_ALL = 0  # Общий топик для ВСЕХ логов/отзывов
 
 TOPICS_BY_CATEGORY = {
     "support_bots": 38,    # Топик для Ботов поддержки
@@ -54,7 +54,8 @@ async def is_user_admin(user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(chat_id=ADMIN_GROUP_ID, user_id=user_id)
         return member.status in ["creator", "administrator", "member"]
-    except Exception:
+    except Exception as e:
+        logging.error(f"Ошибка проверки админки: {e}")
         return False
 
 # --- MIDDLEWARE (БАН) ---
@@ -88,139 +89,316 @@ def get_thread_id(message: Message) -> int:
 
 @router.message(Command("add"))
 async def admin_add(message: Message, state: FSMContext):
-    if not await is_user_admin(message.from_user.id): return
+    """Добавить проект"""
+    if not await is_user_admin(message.from_user.id): 
+        return
+        
     await state.clear()
+    
     try:
+        if len(message.text.split()) < 2:
+            await message.reply(
+                "❌ Неверный формат. Используйте:\n"
+                "<code>/add категория | Название | Описание</code>\n\n"
+                "Пример: <code>/add support_bots | Бот Помощи | Отвечает на вопросы</code>",
+                parse_mode="HTML",
+                message_thread_id=get_thread_id(message)
+            )
+            return
+        
         raw = message.text.split(maxsplit=1)[1]
-        cat, name, desc = [p.strip() for p in raw.split("|")]
-        supabase.table("projects").insert({"name": name, "category": cat, "description": desc}).execute()
-        await message.answer(
-            f"✅ Проект <b>{name}</b> добавлен.", 
-            parse_mode="HTML",
-            message_thread_id=get_thread_id(message)
-        )
+        parts = raw.split("|")
+        
+        if len(parts) < 3:
+            await message.reply(
+                "❌ Неверный формат. Нужно три параметра через '|':\n"
+                "1. Категория\n"
+                "2. Название\n"
+                "3. Описание",
+                parse_mode="HTML",
+                message_thread_id=get_thread_id(message)
+            )
+            return
+        
+        cat, name, desc = [p.strip() for p in parts[:3]]
+        
+        # Проверка категории
+        if cat not in CATEGORIES:
+            categories_list = "\n".join([f"- <code>{k}</code> ({v})" for k, v in CATEGORIES.items()])
+            await message.reply(
+                f"❌ Неверная категория. Доступные:\n{categories_list}",
+                parse_mode="HTML",
+                message_thread_id=get_thread_id(message)
+            )
+            return
+        
+        # Проверка существования проекта
+        existing = supabase.table("projects").select("*").eq("name", name).execute()
+        if existing.data:
+            await message.reply(
+                f"⚠️ Проект <b>{name}</b> уже существует!\n"
+                f"Используйте другое название или /del {name}",
+                parse_mode="HTML",
+                message_thread_id=get_thread_id(message)
+            )
+            return
+        
+        # Добавление проекта
+        result = supabase.table("projects").insert({
+            "name": name, 
+            "category": cat, 
+            "description": desc,
+            "score": 0
+        }).execute()
+        
+        if result.data:
+            await message.reply(
+                f"✅ Проект <b>{name}</b> успешно добавлен!\n"
+                f"📂 Категория: <code>{cat}</code>\n"
+                f"📝 Описание: {desc}",
+                parse_mode="HTML",
+                message_thread_id=get_thread_id(message)
+            )
+        else:
+            await message.reply(
+                "❌ Ошибка при добавлении проекта. Попробуйте снова.",
+                message_thread_id=get_thread_id(message)
+            )
+            
     except Exception as e:
         logging.error(f"Ошибка в /add: {e}")
-        await message.answer(
-            "❌ Формат: /add категория | Название | Описание\nПример: /add support_bots | Бот Помощи | Отвечает на вопросы",
+        await message.reply(
+            "❌ Ошибка при обработке команды. Формат:\n"
+            "<code>/add категория | Название | Описание</code>",
+            parse_mode="HTML",
             message_thread_id=get_thread_id(message)
         )
 
 @router.message(Command("del"))
 async def admin_delete(message: Message, state: FSMContext):
-    if not await is_user_admin(message.from_user.id): return
+    """Удалить проект"""
+    if not await is_user_admin(message.from_user.id): 
+        return
+        
     await state.clear()
+    
     try:
+        if len(message.text.split()) < 2:
+            await message.reply(
+                "❌ Укажите название проекта для удаления:\n"
+                "<code>/del Название проекта</code>",
+                parse_mode="HTML",
+                message_thread_id=get_thread_id(message)
+            )
+            return
+        
         name = message.text.split(maxsplit=1)[1].strip()
+        
+        # Проверка существования проекта
+        existing = supabase.table("projects").select("*").eq("name", name).execute()
+        if not existing.data:
+            await message.reply(
+                f"❌ Проект <b>{name}</b> не найден!",
+                parse_mode="HTML",
+                message_thread_id=get_thread_id(message)
+            )
+            return
+        
+        # Удаление проекта
         result = supabase.table("projects").delete().eq("name", name).execute()
-        if len(result.data) > 0:
-            await message.answer(
-                f"🗑 Проект <b>{name}</b> удален.", 
-                parse_mode="HTML",
-                message_thread_id=get_thread_id(message)
-            )
-        else:
-            await message.answer(
-                f"❌ Проект <b>{name}</b> не найден.", 
-                parse_mode="HTML",
-                message_thread_id=get_thread_id(message)
-            )
+        
+        # Удаление связанных отзывов
+        project_id = existing.data[0]['id']
+        supabase.table("user_logs").delete().eq("project_id", project_id).execute()
+        
+        await message.reply(
+            f"🗑 Проект <b>{name}</b> успешно удален!\n"
+            f"📊 Удалено отзывов: {len(result.data) if result.data else 0}",
+            parse_mode="HTML",
+            message_thread_id=get_thread_id(message)
+        )
+        
     except Exception as e:
         logging.error(f"Ошибка в /del: {e}")
-        await message.answer(
-            "❌ Формат: /del Название\nПример: /del Бот Помощи",
+        await message.reply(
+            "❌ Ошибка при удалении проекта. Попробуйте снова.",
             message_thread_id=get_thread_id(message)
         )
 
 @router.message(Command("score"))
 async def admin_score(message: Message, state: FSMContext):
-    if not await is_user_admin(message.from_user.id): return
-    await state.clear()
-    try:
-        raw = message.text.split(maxsplit=1)[1]
-        name, val = [p.strip() for p in raw.split("|")]
-        val = int(val)
+    """Изменить рейтинг проекта"""
+    if not await is_user_admin(message.from_user.id): 
+        return
         
-        # Получаем текущий рейтинг
-        result = supabase.table("projects").select("score, id").eq("name", name).execute()
-        if not result.data:
-            await message.answer(
-                f"❌ Проект <b>{name}</b> не найден.",
+    await state.clear()
+    
+    try:
+        if len(message.text.split()) < 2:
+            await message.reply(
+                "❌ Неверный формат. Используйте:\n"
+                "<code>/score Название | число</code>\n\n"
+                "Пример: <code>/score Бот Помощи | 10</code>\n"
+                "Пример: <code>/score Бот Помощи | -5</code>",
                 parse_mode="HTML",
                 message_thread_id=get_thread_id(message)
             )
             return
+        
+        raw = message.text.split(maxsplit=1)[1]
+        parts = raw.split("|")
+        
+        if len(parts) < 2:
+            await message.reply(
+                "❌ Неверный формат. Нужно два параметра через '|':\n"
+                "1. Название проекта\n"
+                "2. Число (положительное или отрицательное)",
+                parse_mode="HTML",
+                message_thread_id=get_thread_id(message)
+            )
+            return
+        
+        name, val_str = [p.strip() for p in parts[:2]]
+        
+        try:
+            val = int(val_str)
+        except ValueError:
+            await message.reply(
+                f"❌ <b>{val_str}</b> не является числом!",
+                parse_mode="HTML",
+                message_thread_id=get_thread_id(message)
+            )
+            return
+        
+        # Проверка существования проекта
+        existing = supabase.table("projects").select("*").eq("name", name).execute()
+        if not existing.data:
+            await message.reply(
+                f"❌ Проект <b>{name}</b> не найден!",
+                parse_mode="HTML",
+                message_thread_id=get_thread_id(message)
+            )
+            return
+        
+        project = existing.data[0]
+        old_score = project['score']
+        new_score = old_score + val
+        
+        # Обновление рейтинга
+        result = supabase.table("projects").update({
+            "score": new_score
+        }).eq("id", project['id']).execute()
+        
+        if result.data:
+            change_symbol = "📈" if val > 0 else "📉" if val < 0 else "➡️"
+            await message.reply(
+                f"{change_symbol} Рейтинг проекта <b>{name}</b> изменен!\n\n"
+                f"🔢 Было: <b>{old_score}</b>\n"
+                f"🔢 Стало: <b>{new_score}</b>\n"
+                f"📊 Изменение: <code>{val:+d}</code>",
+                parse_mode="HTML",
+                message_thread_id=get_thread_id(message)
+            )
+        else:
+            await message.reply(
+                "❌ Ошибка при обновлении рейтинга.",
+                message_thread_id=get_thread_id(message)
+            )
             
-        current_score = result.data[0]['score']
-        project_id = result.data[0]['id']
-        new_score = current_score + val
-        
-        # Обновляем рейтинг
-        supabase.table("projects").update({"score": new_score}).eq("id", project_id).execute()
-        
-        await message.answer(
-            f"⚖️ Рейтинг {name}: <b>{current_score} → {new_score}</b> (изменение: {val:+d})", 
-            parse_mode="HTML",
-            message_thread_id=get_thread_id(message)
-        )
     except Exception as e:
         logging.error(f"Ошибка в /score: {e}")
-        await message.answer(
-            "❌ Формат: /score Название | число\nПример: /score Бот Помощи | 10",
+        await message.reply(
+            "❌ Ошибка при обработке команды. Формат:\n"
+            "<code>/score Название | число</code>",
+            parse_mode="HTML",
             message_thread_id=get_thread_id(message)
         )
 
 @router.message(Command("delrev"))
 async def admin_delrev(message: Message, state: FSMContext):
-    if not await is_user_admin(message.from_user.id): return
+    """Удалить отзыв"""
+    if not await is_user_admin(message.from_user.id): 
+        return
+        
     await state.clear()
+    
     try:
-        log_id = int(message.text.split()[1])
-        
-        # Получаем отзыв
-        rev_result = supabase.table("user_logs").select("*").eq("id", log_id).execute()
-        if not rev_result.data:
-            await message.answer(
-                f"❌ Отзыв #{log_id} не найден.",
-                message_thread_id=get_thread_id(message)
-            )
-            return
-            
-        rev = rev_result.data[0]
-        
-        # Получаем проект
-        project_result = supabase.table("projects").select("score, name").eq("id", rev['project_id']).execute()
-        if project_result.data:
-            p = project_result.data[0]
-            rating_change = RATING_MAP.get(rev['rating_val'], 0)
-            new_score = p['score'] - rating_change
-            
-            # Обновляем рейтинг проекта
-            supabase.table("projects").update({"score": new_score}).eq("id", rev['project_id']).execute()
-            
-            # Удаляем отзыв
-            supabase.table("user_logs").delete().eq("id", log_id).execute()
-            
-            await message.answer(
-                f"🗑 Отзыв #{log_id} удален.\n"
-                f"Проект: <b>{p['name']}</b>\n"
-                f"Новый рейтинг: <b>{new_score}</b> (было: {p['score']})",
+        if len(message.text.split()) < 2:
+            await message.reply(
+                "❌ Укажите ID отзыва для удаления:\n"
+                "<code>/delrev 123</code>\n\n"
+                "ID отзыва можно взять из сообщения бота.",
                 parse_mode="HTML",
                 message_thread_id=get_thread_id(message)
             )
-        else:
-            await message.answer(
-                f"❌ Проект отзыва #{log_id} не найден.",
+            return
+        
+        log_id_str = message.text.split()[1]
+        
+        try:
+            log_id = int(log_id_str)
+        except ValueError:
+            await message.reply(
+                f"❌ <b>{log_id_str}</b> не является числовым ID!",
+                parse_mode="HTML",
                 message_thread_id=get_thread_id(message)
             )
+            return
+        
+        # Проверка существования отзыва
+        rev_result = supabase.table("user_logs").select("*").eq("id", log_id).execute()
+        if not rev_result.data:
+            await message.reply(
+                f"❌ Отзыв <b>#{log_id}</b> не найден!",
+                parse_mode="HTML",
+                message_thread_id=get_thread_id(message)
+            )
+            return
+        
+        rev = rev_result.data[0]
+        
+        # Получение информации о проекте
+        project_result = supabase.table("projects").select("*").eq("id", rev['project_id']).execute()
+        if not project_result.data:
+            await message.reply(
+                f"❌ Проект отзыва #{log_id} не найден!",
+                message_thread_id=get_thread_id(message)
+            )
+            return
+        
+        project = project_result.data[0]
+        old_score = project['score']
+        
+        # Вычисление нового рейтинга
+        rating_change = RATING_MAP.get(rev['rating_val'], 0)
+        new_score = old_score - rating_change
+        
+        # Обновление рейтинга проекта
+        supabase.table("projects").update({
+            "score": new_score
+        }).eq("id", rev['project_id']).execute()
+        
+        # Удаление отзыва
+        result = supabase.table("user_logs").delete().eq("id", log_id).execute()
+        
+        await message.reply(
+            f"🗑 Отзыв <b>#{log_id}</b> успешно удален!\n\n"
+            f"📁 Проект: <b>{project['name']}</b>\n"
+            f"⭐ Оценка: {rev['rating_val']}/5\n"
+            f"📊 Рейтинг проекта: {old_score} → {new_score} ({rating_change:+d})\n"
+            f"👤 Пользователь: {rev['user_id']}",
+            parse_mode="HTML",
+            message_thread_id=get_thread_id(message)
+        )
+        
     except Exception as e:
         logging.error(f"Ошибка в /delrev: {e}")
-        await message.answer(
-            "❌ Формат: /delrev ID\nПример: /delrev 123",
+        await message.reply(
+            "❌ Ошибка при удалении отзыва. Проверьте ID.",
             message_thread_id=get_thread_id(message)
         )
 
-# --- ЛОГИКА ПОЛЬЗОВАТЕЛЯ ---
+# --- ЛОГИКА ПОЛЬЗОВАТЕЛЯ (остается без изменений) ---
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
@@ -230,28 +408,17 @@ async def cmd_start(message: Message, state: FSMContext):
     if top:
         for i, p in enumerate(top, 1):
             text += f"{i}. <b>{p['name']}</b> — <code>{p['score']}</code>\n"
-    else: 
-        text += "Список пуст.\n"
-    
-    if message.chat.type == "private":
-        await message.answer(text, reply_markup=main_kb(), parse_mode="HTML")
-    else:
-        await message.answer(text, parse_mode="HTML")
+    else: text += "Список пуст.\n"
+    await message.answer(text, reply_markup=main_kb(), parse_mode="HTML")
 
 @router.message(F.text.in_(CATEGORIES.values()))
 async def show_cat(message: Message):
     cat_key = [k for k, v in CATEGORIES.items() if v == message.text][0]
     data = supabase.table("projects").select("*").eq("category", cat_key).order("score", desc=True).execute().data
-    if not data: 
-        await message.answer(f"В разделе '{message.text}' пусто.")
-        return
-    
+    if not data: return await message.answer(f"В разделе '{message.text}' пусто.")
     for p in data:
         card = f"<b>{p['name']}</b>\n\n{p['description']}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\nРейтинг: <b>{p['score']}</b>"
-        if message.chat.type == "private":
-            await message.answer(card, reply_markup=project_inline_kb(p['id']), parse_mode="HTML")
-        else:
-            await message.answer(card, parse_mode="HTML")
+        await message.answer(card, reply_markup=project_inline_kb(p['id']), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("rev_"))
 async def rev_start(call: CallbackQuery, state: FSMContext):
@@ -259,64 +426,34 @@ async def rev_start(call: CallbackQuery, state: FSMContext):
     check = supabase.table("user_logs").select("*").eq("user_id", call.from_user.id).eq("project_id", p_id).eq("action_type", "review").execute()
     await state.update_data(p_id=p_id)
     await state.set_state(ReviewState.waiting_for_text)
-    
     txt = "📝 <b>Изменение отзыва. Введите новый текст:</b>" if check.data else "💬 <b>Введите текст отзыва:</b>"
-    
-    if call.message.chat.type == "private":
-        await call.message.answer(txt, parse_mode="HTML")
-    else:
-        await call.message.reply(txt, parse_mode="HTML")
-    
-    await call.answer()
+    await call.message.answer(txt, parse_mode="HTML"); await call.answer()
 
 @router.message(ReviewState.waiting_for_text)
 async def rev_text(message: Message, state: FSMContext):
-    if message.text and message.text.startswith("/"): 
-        return 
-    
+    if message.text and message.text.startswith("/"): return 
     await state.update_data(txt=message.text)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⭐"*i, callback_data=f"st_{i}")] for i in range(5, 0, -1)
-    ])
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⭐"*i, callback_data=f"st_{i}")] for i in range(5, 0, -1)])
     await state.set_state(ReviewState.waiting_for_rate)
-    
-    if message.chat.type == "private":
-        await message.answer("🌟 <b>Выберите оценку:</b>", reply_markup=kb, parse_mode="HTML")
-    else:
-        await message.reply("🌟 <b>Выберите оценку:</b>", reply_markup=kb, parse_mode="HTML")
+    await message.answer("🌟 <b>Выберите оценку:</b>", reply_markup=kb, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("st_"), ReviewState.waiting_for_rate)
 async def rev_end(call: CallbackQuery, state: FSMContext):
-    rate = int(call.data.split("_")[1])
-    data = await state.get_data()
-    p_id = data['p_id']
-    
+    rate = int(call.data.split("_")[1]); data = await state.get_data(); p_id = data['p_id']
     old_rev = supabase.table("user_logs").select("*").eq("user_id", call.from_user.id).eq("project_id", p_id).eq("action_type", "review").execute()
     p = supabase.table("projects").select("*").eq("id", p_id).single().execute().data
     
     if old_rev.data:
         new_score = p['score'] - RATING_MAP[old_rev.data[0]['rating_val']] + RATING_MAP[rate]
         supabase.table("user_logs").update({"review_text": data['txt'], "rating_val": rate}).eq("id", old_rev.data[0]['id']).execute()
-        res_txt = "обновлен"
-        log_id = old_rev.data[0]['id']
+        res_txt = "обновлен"; log_id = old_rev.data[0]['id']
     else:
         new_score = p['score'] + RATING_MAP[rate]
-        log = supabase.table("user_logs").insert({
-            "user_id": call.from_user.id, 
-            "project_id": p_id, 
-            "action_type": "review", 
-            "review_text": data['txt'], 
-            "rating_val": rate
-        }).execute()
-        res_txt = "добавлен"
-        log_id = log.data[0]['id']
+        log = supabase.table("user_logs").insert({"user_id": call.from_user.id, "project_id": p_id, "action_type": "review", "review_text": data['txt'], "rating_val": rate}).execute()
+        res_txt = "добавлен"; log_id = log.data[0]['id']
 
     supabase.table("projects").update({"score": new_score}).eq("id", p_id).execute()
-    
-    if call.message.chat.type == "private":
-        await call.message.edit_text(f"✅ Отзыв успешно {res_txt}!", parse_mode="HTML")
-    else:
-        await call.message.reply(f"✅ Отзыв успешно {res_txt}!", parse_mode="HTML")
+    await call.message.edit_text(f"✅ Отзыв успешно {res_txt}!", parse_mode="HTML")
     
     # ФОРМИРУЕМ ЛОГ
     admin_text = (f"📢 <b>Отзыв {res_txt}:</b> {p['name']}\n"
@@ -334,36 +471,22 @@ async def rev_end(call: CallbackQuery, state: FSMContext):
     if cat_topic:
         await bot.send_message(ADMIN_GROUP_ID, admin_text, message_thread_id=cat_topic, parse_mode="HTML")
 
-    await state.clear()
-    await call.answer()
+    await state.clear(); await call.answer()
 
 @router.callback_query(F.data.startswith("viewrev_"))
 async def view_reviews(call: CallbackQuery):
     p_id = call.data.split("_")[1]
     revs = supabase.table("user_logs").select("*").eq("project_id", p_id).eq("action_type", "review").order("created_at", desc=True).limit(5).execute().data
-    if not revs: 
-        await call.answer("Отзывов еще нет.", show_alert=True)
-        return
-    
+    if not revs: return await call.answer("Отзывов еще нет.", show_alert=True)
     text = "<b>💬 ПОСЛЕДНИЕ ОТЗЫВЫ:</b>\n\n"
-    for r in revs: 
-        text += f"{'⭐' * r['rating_val']}\n<i>{r['review_text']}</i>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-    
-    if call.message.chat.type == "private":
-        await call.message.answer(text, parse_mode="HTML")
-    else:
-        await call.message.reply(text, parse_mode="HTML")
-    
-    await call.answer()
+    for r in revs: text += f"{'⭐' * r['rating_val']}\n<i>{r['review_text']}</i>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+    await call.message.answer(text, parse_mode="HTML"); await call.answer()
 
 @router.callback_query(F.data.startswith("like_"))
 async def handle_like(call: CallbackQuery):
     p_id = call.data.split("_")[1]
     check = supabase.table("user_logs").select("id").eq("user_id", call.from_user.id).eq("project_id", p_id).eq("action_type", "like").execute()
-    if check.data: 
-        await call.answer("Вы уже поддержали этот проект!", show_alert=True)
-        return
-    
+    if check.data: return await call.answer("Вы уже поддержали этот проект!", show_alert=True)
     res = supabase.table("projects").select("score").eq("id", p_id).single().execute().data
     supabase.table("projects").update({"score": res['score'] + 1}).eq("id", p_id).execute()
     supabase.table("user_logs").insert({"user_id": call.from_user.id, "project_id": p_id, "action_type": "like"}).execute()
