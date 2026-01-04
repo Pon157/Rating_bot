@@ -13,7 +13,7 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 
 # --- НАСТРОЙКИ ТОПИКОВ (Замени цифры на ID из ссылок) ---
-TOPIC_LOGS_ALL = 46  # Общий топик для ВСЕХ логов/отзывов
+TOPIC_LOGS_ALL = 46 # Общий топик для ВСЕХ логов/отзывов
 
 TOPICS_BY_CATEGORY = {
     "support_bots": 38,    # Топик для Ботов поддержки
@@ -48,9 +48,6 @@ RATING_MAP = {1: -5, 2: -2, 3: 0, 4: 2, 5: 5}
 class ReviewState(StatesGroup):
     waiting_for_text = State()
     waiting_for_rate = State()
-
-class AdminScoreState(StatesGroup):
-    waiting_for_reason = State()
 
 # --- ПРОВЕРКА ПРАВ (ПО ЧАТУ) ---
 async def is_user_admin(user_id: int) -> bool:
@@ -301,8 +298,8 @@ async def admin_score(message: Message, state: FSMContext):
         if len(message.text.split()) < 2:
             await message.reply(
                 "Неверный формат команды.\n"
-                "Используйте: /score Название_проекта | изменение_рейтинга\n\n"
-                "Пример: /score Бот Помощи | 10",
+                "Используйте: /score Название_проекта | изменение_рейтинга | причина\n\n"
+                "Пример: /score Бот Помощи | 10 | Добавление новых функций",
                 parse_mode="HTML"
             )
             return
@@ -310,15 +307,24 @@ async def admin_score(message: Message, state: FSMContext):
         raw = message.text.split(maxsplit=1)[1]
         parts = raw.split("|")
         
-        if len(parts) < 2:
+        if len(parts) < 3:
             await message.reply(
-                "Неверный формат. Необходимо два параметра.\n\n"
+                "Неверный формат. Необходимо три параметра.\n\n"
                 "1. Название проекта\n"
-                "2. Изменение рейтинга (положительное или отрицательное число)",
+                "2. Изменение рейтинга (число)\n"
+                "3. Причина изменения",
             )
             return
         
-        name, val_str = [p.strip() for p in parts[:2]]
+        name = parts[0].strip()
+        val_str = parts[1].strip()
+        reason = parts[2].strip()
+        
+        if not reason or len(reason) < 3:
+            await message.reply(
+                "Причина изменения должна содержать минимум 3 символа.",
+            )
+            return
         
         try:
             val = int(val_str)
@@ -338,58 +344,10 @@ async def admin_score(message: Message, state: FSMContext):
             return
         
         project = existing.data[0]
-        await state.update_data(
-            project_id=project['id'],
-            project_name=name,
-            category=project['category'],
-            old_score=project['score'],
-            change_amount=val
-        )
-        
-        await state.set_state(AdminScoreState.waiting_for_reason)
-        await message.reply(
-            f"Укажите причину изменения рейтинга для проекта '{name}':\n\n"
-            f"Текущий рейтинг: {project['score']}\n"
-            f"Изменение: {val:+d}\n"
-            f"Новый рейтинг будет: {project['score'] + val}",
-            parse_mode="HTML"
-        )
-            
-    except Exception as e:
-        logging.error(f"Ошибка в команде /score: {e}")
-        await message.reply(
-            "Произошла ошибка при обработке команды.",
-        )
-
-@router.message(AdminScoreState.waiting_for_reason)
-async def admin_score_reason(message: Message, state: FSMContext):
-    """Обработка причины изменения рейтинга"""
-    if message.text.startswith("/"):
-        await state.clear()
-        return
-    
-    data = await state.get_data()
-    reason = message.text.strip()
-    
-    if not reason:
-        await message.reply(
-            "Причина изменения не может быть пустой. Пожалуйста, укажите причину."
-        )
-        return
-    
-    if len(reason) < 5:
-        await message.reply(
-            "Причина изменения должна содержать минимум 5 символов."
-        )
-        return
-    
-    try:
-        project_id = data['project_id']
-        project_name = data['project_name']
-        category = data['category']
-        old_score = data['old_score']
-        change_amount = data['change_amount']
-        new_score = old_score + change_amount
+        project_id = project['id']
+        category = project['category']
+        old_score = project['score']
+        new_score = old_score + val
         
         # Обновляем рейтинг проекта
         supabase.table("projects").update({"score": new_score}).eq("id", project_id).execute()
@@ -402,20 +360,20 @@ async def admin_score_reason(message: Message, state: FSMContext):
             "change_type": "admin_change",
             "score_before": old_score,
             "score_after": new_score,
-            "change_amount": change_amount,
+            "change_amount": val,
             "reason": reason,
             "is_admin_action": True
         }).execute()
         
         # Отправляем лог
-        change_direction = "увеличен" if change_amount > 0 else "уменьшен" if change_amount < 0 else "не изменился"
+        change_direction = "увеличен" if val > 0 else "уменьшен" if val < 0 else "не изменился"
         log_text = (
             f"Изменен рейтинг проекта:\n\n"
-            f"Название: {project_name}\n"
+            f"Название: {name}\n"
             f"Категория: {category}\n"
             f"Предыдущий рейтинг: {old_score}\n"
             f"Новый рейтинг: {new_score}\n"
-            f"Изменение: {change_amount:+d}\n"
+            f"Изменение: {val:+d}\n"
             f"Статус: рейтинг {change_direction}\n"
             f"Причина: {reason}\n"
             f"Администратор: @{message.from_user.username or message.from_user.id}"
@@ -425,19 +383,18 @@ async def admin_score_reason(message: Message, state: FSMContext):
         
         await message.reply(
             f"Рейтинг проекта изменен.\n\n"
-            f"Проект: {project_name}\n"
-            f"Рейтинг: {old_score} → {new_score} ({change_amount:+d})\n"
+            f"Проект: {name}\n"
+            f"Рейтинг: {old_score} → {new_score} ({val:+d})\n"
             f"Причина: {reason}",
             parse_mode="HTML"
         )
-        
+            
     except Exception as e:
-        logging.error(f"Ошибка при сохранении изменения рейтинга: {e}")
+        logging.error(f"Ошибка в команде /score: {e}")
         await message.reply(
-            "Ошибка при сохранении изменений.",
+            "Произошла ошибка при обработке команды.\n\n"
+            "Правильный формат: /score Название | число | причина",
         )
-    
-    await state.clear()
 
 @router.message(Command("delrev"))
 async def admin_delrev(message: Message, state: FSMContext):
