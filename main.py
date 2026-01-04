@@ -1,7 +1,6 @@
 import asyncio
 import os
 import logging
-from datetime import datetime
 from aiogram import Bot, Dispatcher, Router, F, BaseMiddleware
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
@@ -85,11 +84,6 @@ def project_inline_kb(p_id):
          InlineKeyboardButton(text="📊 История изменений", callback_data=f"history_{p_id}")]
     ])
 
-# --- ПОЛУЧЕНИЕ ТОПИКА ДЛЯ ОТВЕТА ---
-def get_thread_id(message: Message) -> int:
-    """Получает thread_id из сообщения или возвращает 0"""
-    return message.message_thread_id if message.message_thread_id else 0
-
 # --- ФУНКЦИЯ ОТПРАВКИ ЛОГОВ ---
 async def send_log_to_topics(admin_text: str, category: str = None):
     """Отправляет лог во все нужные топики"""
@@ -139,8 +133,7 @@ async def admin_add(message: Message, state: FSMContext):
                 "❌ Неверный формат. Используйте:\n"
                 "<code>/add категория | Название | Описание</code>\n\n"
                 "Пример: <code>/add support_bots | Бот Помощи | Отвечает на вопросы</code>",
-                parse_mode="HTML",
-                message_thread_id=get_thread_id(message)
+                parse_mode="HTML"
             )
             return
         
@@ -153,8 +146,7 @@ async def admin_add(message: Message, state: FSMContext):
                 "1. Категория\n"
                 "2. Название\n"
                 "3. Описание",
-                parse_mode="HTML",
-                message_thread_id=get_thread_id(message)
+                parse_mode="HTML"
             )
             return
         
@@ -164,8 +156,7 @@ async def admin_add(message: Message, state: FSMContext):
             categories_list = "\n".join([f"- <code>{k}</code> ({v})" for k, v in CATEGORIES.items()])
             await message.reply(
                 f"❌ Неверная категория. Доступные:\n{categories_list}",
-                parse_mode="HTML",
-                message_thread_id=get_thread_id(message)
+                parse_mode="HTML"
             )
             return
         
@@ -173,8 +164,7 @@ async def admin_add(message: Message, state: FSMContext):
         if existing.data:
             await message.reply(
                 f"⚠️ Проект <b>{name}</b> уже существует!",
-                parse_mode="HTML",
-                message_thread_id=get_thread_id(message)
+                parse_mode="HTML"
             )
             return
         
@@ -210,20 +200,17 @@ async def admin_add(message: Message, state: FSMContext):
             
             await message.reply(
                 f"✅ Проект <b>{name}</b> успешно добавлен!",
-                parse_mode="HTML",
-                message_thread_id=get_thread_id(message)
+                parse_mode="HTML"
             )
         else:
             await message.reply(
                 "❌ Ошибка при добавлении проекта.",
-                message_thread_id=get_thread_id(message)
             )
             
     except Exception as e:
         logging.error(f"Ошибка в /add: {e}")
         await message.reply(
             "❌ Ошибка при обработке команды.",
-            message_thread_id=get_thread_id(message)
         )
 
 @router.message(Command("del"))
@@ -236,8 +223,7 @@ async def admin_delete(message: Message, state: FSMContext):
     try:
         if len(message.text.split()) < 2:
             await message.reply(
-                "❌ Укажите название проекта для удаления.",
-                message_thread_id=get_thread_id(message)
+                "❌ Укажите название проекта для удаления."
             )
             return
         
@@ -247,8 +233,7 @@ async def admin_delete(message: Message, state: FSMContext):
         if not existing.data:
             await message.reply(
                 f"❌ Проект <b>{name}</b> не найден!",
-                parse_mode="HTML",
-                message_thread_id=get_thread_id(message)
+                parse_mode="HTML"
             )
             return
         
@@ -293,15 +278,13 @@ async def admin_delete(message: Message, state: FSMContext):
             f"🗑 Проект <b>{name}</b> удален!\n"
             f"📊 Удалено отзывов: {reviews_num}\n"
             f"🔢 Финальный рейтинг: {score}",
-            parse_mode="HTML",
-            message_thread_id=get_thread_id(message)
+            parse_mode="HTML"
         )
         
     except Exception as e:
         logging.error(f"Ошибка в /del: {e}")
         await message.reply(
-            "❌ Ошибка при удалении проекта.",
-            message_thread_id=get_thread_id(message)
+            "❌ Ошибка при удалении проекта."
         )
 
 @router.message(Command("score"))
@@ -315,8 +298,7 @@ async def admin_score(message: Message, state: FSMContext):
                 "❌ Неверный формат. Используйте:\n"
                 "<code>/score Название | число</code>\n\n"
                 "Пример: <code>/score Бот Помощи | 10</code>",
-                parse_mode="HTML",
-                message_thread_id=get_thread_id(message)
+                parse_mode="HTML"
             )
             return
         
@@ -325,8 +307,7 @@ async def admin_score(message: Message, state: FSMContext):
         
         if len(parts) < 2:
             await message.reply(
-                "❌ Неверный формат. Нужно два параметра.",
-                message_thread_id=get_thread_id(message)
+                "❌ Неверный формат. Нужно два параметра."
             )
             return
         
@@ -337,8 +318,7 @@ async def admin_score(message: Message, state: FSMContext):
         except ValueError:
             await message.reply(
                 f"❌ <b>{val_str}</b> не является числом!",
-                parse_mode="HTML",
-                message_thread_id=get_thread_id(message)
+                parse_mode="HTML"
             )
             return
         
@@ -346,8 +326,7 @@ async def admin_score(message: Message, state: FSMContext):
         if not existing.data:
             await message.reply(
                 f"❌ Проект <b>{name}</b> не найден!",
-                parse_mode="HTML",
-                message_thread_id=get_thread_id(message)
+                parse_mode="HTML"
             )
             return
         
@@ -366,15 +345,13 @@ async def admin_score(message: Message, state: FSMContext):
             f"🔢 Текущий рейтинг: <b>{project['score']}</b>\n"
             f"📊 Изменение: <code>{val:+d}</code>\n"
             f"🔢 Новый рейтинг будет: <b>{project['score'] + val}</b>",
-            parse_mode="HTML",
-            message_thread_id=get_thread_id(message)
+            parse_mode="HTML"
         )
             
     except Exception as e:
         logging.error(f"Ошибка в /score: {e}")
         await message.reply(
-            "❌ Ошибка при обработке команды.",
-            message_thread_id=get_thread_id(message)
+            "❌ Ошибка при обработке команды."
         )
 
 @router.message(AdminScoreState.waiting_for_reason)
@@ -389,8 +366,7 @@ async def admin_score_reason(message: Message, state: FSMContext):
     
     if not reason:
         await message.reply(
-            "❌ Причина не может быть пустой. Пожалуйста, укажите причину изменения.",
-            message_thread_id=get_thread_id(message)
+            "❌ Причина не может быть пустой. Пожалуйста, укажите причину изменения."
         )
         return
     
@@ -436,15 +412,13 @@ async def admin_score_reason(message: Message, state: FSMContext):
             f"🏷 Проект: <b>{project_name}</b>\n"
             f"🔢 {old_score} → <b>{new_score}</b> ({change_amount:+d})\n"
             f"📝 Причина: <i>{reason}</i>",
-            parse_mode="HTML",
-            message_thread_id=get_thread_id(message)
+            parse_mode="HTML"
         )
         
     except Exception as e:
         logging.error(f"Ошибка в обработке причины: {e}")
         await message.reply(
-            "❌ Ошибка при сохранении изменений.",
-            message_thread_id=get_thread_id(message)
+            "❌ Ошибка при сохранении изменений."
         )
     
     await state.clear()
@@ -459,8 +433,7 @@ async def admin_delrev(message: Message, state: FSMContext):
     try:
         if len(message.text.split()) < 2:
             await message.reply(
-                "❌ Укажите ID отзыва для удаления.",
-                message_thread_id=get_thread_id(message)
+                "❌ Укажите ID отзыва для удаления."
             )
             return
         
@@ -471,8 +444,7 @@ async def admin_delrev(message: Message, state: FSMContext):
         except ValueError:
             await message.reply(
                 f"❌ <b>{log_id_str}</b> не является числовым ID!",
-                parse_mode="HTML",
-                message_thread_id=get_thread_id(message)
+                parse_mode="HTML"
             )
             return
         
@@ -480,8 +452,7 @@ async def admin_delrev(message: Message, state: FSMContext):
         if not rev_result.data:
             await message.reply(
                 f"❌ Отзыв <b>#{log_id}</b> не найден!",
-                parse_mode="HTML",
-                message_thread_id=get_thread_id(message)
+                parse_mode="HTML"
             )
             return
         
@@ -490,8 +461,7 @@ async def admin_delrev(message: Message, state: FSMContext):
         project_result = supabase.table("projects").select("*").eq("id", rev['project_id']).execute()
         if not project_result.data:
             await message.reply(
-                f"❌ Проект отзыва #{log_id} не найден!",
-                message_thread_id=get_thread_id(message)
+                f"❌ Проект отзыва #{log_id} не найден!"
             )
             return
         
@@ -537,15 +507,13 @@ async def admin_delrev(message: Message, state: FSMContext):
             f"🗑 Отзыв <b>#{log_id}</b> удален!\n"
             f"📁 Проект: <b>{project['name']}</b>\n"
             f"📊 Рейтинг: {old_score} → {new_score} ({rating_change:+d})",
-            parse_mode="HTML",
-            message_thread_id=get_thread_id(message)
+            parse_mode="HTML"
         )
         
     except Exception as e:
         logging.error(f"Ошибка в /delrev: {e}")
         await message.reply(
-            "❌ Ошибка при удалении отзыва.",
-            message_thread_id=get_thread_id(message)
+            "❌ Ошибка при удалении отзыва."
         )
 
 # --- ЛОГИКА ПОЛЬЗОВАТЕЛЯ ---
