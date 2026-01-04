@@ -13,7 +13,7 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 
 # --- НАСТРОЙКИ ТОПИКОВ (Замени цифры на ID из ссылок) ---
-TOPIC_LOGS_ALL = 0  # Общий топик для ВСЕХ логов/отзывов
+TOPIC_LOGS_ALL = 46 # Общий топик для ВСЕХ логов/отзывов
 
 TOPICS_BY_CATEGORY = {
     "support_bots": 38,    # Топик для Ботов поддержки
