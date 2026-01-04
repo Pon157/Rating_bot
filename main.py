@@ -17,20 +17,19 @@ from supabase import create_client, Client
 
 # --- КОНФИГУРАЦИЯ ---
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN") # Токен из .env
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", 0))
 
 CATEGORIES = {
-    "support_bots": "🤖 Рейтинг ботов поддержки",
-    "support_admins": "👨‍💻 Рейтинг админов поддержки",
-    "lot_channels": "📦 Каналы с лотами",
-    "check_channels": "✅ Каналы с проверками",
+    "support_bots": "🤖 Боты поддержки",
+    "support_admins": "👨‍💻 Админы поддержки",
+    "lot_channels": "📦 Каналы лотов",
+    "check_channels": "✅ Каналы проверок",
     "kmbp_channels": "🛡 Каналы КМБП"
 }
 
-# Баллы за оценки 1-5
 RATING_MAP = {1: -5, 2: -2, 3: 0, 4: 2, 5: 5}
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -38,186 +37,195 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
 
-# --- MIDDLEWARE (АНТИСПАМ 60 СЕК И БАН) ---
+# --- MIDDLEWARE (ИСПРАВЛЕННЫЙ) ---
 class SecurityMiddleware(BaseMiddleware):
     def __init__(self):
-        self.users_history = {} # {user_id: last_action_time}
+        self.cooldowns = {}
 
-    async def __call__(self, handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
-                       event: TelegramObject, data: Dict[str, Any]) -> Any:
-        # Проверяем, является ли событие сообщением или колбэком
+    async def __call__(self, handler, event, data):
         user = data.get("event_from_user")
         if not user or user.is_bot:
             return await handler(event, data)
 
-        # Достаем chat_id правильно
-        current_chat_id = None
-        if data.get("event_chat"):
-            current_chat_id = data["event_chat"].id
+        # 1. Проверка БАНА
+        res = supabase.table("banned_users").select("user_id").eq("user_id", user.id).execute()
+        if res.data:
+            return 
 
-        # 1. Проверка на БАН
-        is_banned = supabase.table("banned_users").select("user_id").eq("user_id", user.id).execute()
-        if is_banned.data:
-            return
-
-        # 2. АНТИСПАМ
-        # Если это админ в своем чате — разрешаем без задержек
-        if current_chat_id == ADMIN_CHAT_ID:
+        # 2. АНТИСПАМ (60 секунд)
+        # Пропускаем /start и сообщения от админа
+        chat = data.get("event_chat")
+        if chat and chat.id == ADMIN_CHAT_ID:
             return await handler(event, data)
 
-        now = time.time()
-        last_action = self.users_history.get(user.id, 0)
+        if isinstance(event, (Message, CallbackQuery)):
+            if isinstance(event, Message) and event.text == "/start":
+                return await handler(event, data)
+                
+            now = time.time()
+            last = self.cooldowns.get(user.id, 0)
+            if now - last < 60:
+                remains = int(60 - (now - last))
+                if isinstance(event, CallbackQuery):
+                    await event.answer(f"⏳ Кулдаун! Еще {remains} сек.", show_alert=True)
+                else:
+                    await event.answer(f"⏳ **Слишком быстро!**\nПопробуйте через {remains} сек.", parse_mode="Markdown")
+                return
+            self.cooldowns[user.id] = now
 
-        # Ограничение только для нажатий кнопок и текстовых команд
-        if now - last_action < 60:
-            remains = int(60 - (now - last_action))
-            # Если это нажатие инлайн-кнопки
-            if isinstance(event, CallbackQuery):
-                await event.answer(f"⏳ Подождите {remains} сек!", show_alert=True)
-            # Если это обычное сообщение (кнопка меню)
-            elif isinstance(event, Message):
-                await event.answer(f"⚠️ Слишком часто! Кнопки будут доступны через {remains} сек.")
-            return
-
-        self.users_history[user.id] = now
         return await handler(event, data)
-                           
-# --- FSM ---
+
+dp.update.outer_middleware(SecurityMiddleware())
+
+# --- STATES ---
 class ReviewState(StatesGroup):
     waiting_for_text = State()
     waiting_for_rate = State()
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+# --- UTILS ---
 def find_project(target: str):
-    """Поиск по ID или по Названию"""
     if target.isdigit():
         res = supabase.table("projects").select("*").eq("id", int(target)).execute()
     else:
-        res = supabase.table("projects").select("*").ilike("name", target).execute()
+        res = supabase.table("projects").select("*").ilike("name", f"%{target}%").execute()
     return res.data[0] if res.data else None
 
 def update_score(p_id, amount):
     curr = supabase.table("projects").select("score").eq("id", p_id).single().execute()
-    new_score = curr.data['score'] + amount
-    supabase.table("projects").update({"score": new_score}).eq("id", p_id).execute()
-    return new_score
+    new_s = curr.data['score'] + amount
+    supabase.table("projects").update({"score": new_s}).eq("id", p_id).execute()
+    return new_s
 
-# --- КЛАВИАТУРЫ ---
+# --- KEYBOARDS ---
 def main_kb():
-    keys = [[KeyboardButton(text=v)] for v in CATEGORIES.values()]
-    keys.append([KeyboardButton(text="⭐ Мои отзывы")])
-    return ReplyKeyboardMarkup(keyboard=keys, resize_keyboard=True)
+    buttons = [[KeyboardButton(text=v)] for v in CATEGORIES.values()]
+    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, input_field_placeholder="Выберите категорию...")
 
-def project_inline(p_id):
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="👍 +1 Репутация", callback_data=f"like_{p_id}"),
-        InlineKeyboardButton(text="✍️ Написать отзыв", callback_data=f"rev_{p_id}")
-    ]])
+def project_kb(p_id):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👍 Лайк (+1)", callback_data=f"like_{p_id}")],
+        [InlineKeyboardButton(text="✍️ Оставить отзыв", callback_data=f"rev_{p_id}")]
+    ])
 
-# --- АДМИН КОМАНДЫ ---
+# --- ADMIN COMMANDS ---
 @router.message(F.chat.id == ADMIN_CHAT_ID)
-async def admin_panel(message: Message):
+async def admin_handler(message: Message):
     if not message.text: return
-    args = message.text.split()
-    
-    # /add [категория] [Имя] [Описание]
-    if args[0] == "/add" and len(args) >= 3:
-        cat, name = args[1], args[2]
-        desc = " ".join(args[3:]) if len(args) > 3 else "Нет описания"
-        res = supabase.table("projects").insert({"name": name, "category": cat, "description": desc}).execute()
-        await message.reply(f"✅ Добавлен: {name} (ID: {res.data[0]['id']})")
+    text = message.text
+    args = text.split()
 
-    # /mod [Имя или ID] [+/-Баллы]
-    elif args[0] == "/mod" and len(args) == 3:
+    if text.startswith("/add") and len(args) >= 3:
+        cat, name = args[1], args[2]
+        desc = " ".join(args[3:]) if len(args) > 3 else "Описание отсутствует."
+        if cat not in CATEGORIES:
+            return await message.reply("❌ Ошибка! Категории: " + ", ".join(CATEGORIES.keys()))
+        res = supabase.table("projects").insert({"name": name, "category": cat, "description": desc}).execute()
+        await message.reply(f"✅ **Успешно!**\nПроект: `{name}`\nID: `{res.data[0]['id']}`", parse_mode="Markdown")
+
+    elif text.startswith("/mod") and len(args) == 3:
         p = find_project(args[1])
         if p:
             new_s = update_score(p['id'], int(args[2]))
-            await message.reply(f"⚙️ {p['name']}: {new_s} (изменение {args[2]})")
-        else: await message.reply("❌ Проект не найден")
+            await message.reply(f"⚖️ **Рейтинг обновлен!**\nПроект: {p['name']}\nНовый счет: `{new_s}`", parse_mode="Markdown")
+        else: await message.reply("❌ Проект не найден.")
 
-    # /del [Имя или ID]
-    elif args[0] == "/del" and len(args) == 2:
+    elif text.startswith("/del_project") and len(args) == 2:
         p = find_project(args[1])
         if p:
             supabase.table("projects").delete().eq("id", p['id']).execute()
-            await message.reply(f"🗑 Удалено: {p['name']}")
+            await message.reply(f"🗑 Проект **{p['name']}** удален навсегда.")
 
-# --- ЛОГИКА ПОЛЬЗОВАТЕЛЕЙ ---
+    elif text.startswith("/ban") and len(args) == 2:
+        u_id = int(args[1])
+        supabase.table("banned_users").insert({"user_id": u_id, "reason": "Нарушение"}).execute()
+        await message.reply(f"🚫 Пользователь `{u_id}` заблокирован.", parse_mode="Markdown")
+
+# --- USER HANDLERS ---
 @router.message(CommandStart())
-async def start(message: Message):
-    top_10 = supabase.table("projects").select("*").order("score", desc=True).limit(10).execute().data
-    text = "📊 **ОБЩИЙ ТОП-10 ПРОЕКТОВ**\n\n"
-    for i, p in enumerate(top_10, 1):
-        text += f"{i}. {p['name']} — `{p['score']}` баллов\n"
-    await message.answer(text, reply_markup=main_kb(), parse_mode="Markdown")
+async def cmd_start(message: Message):
+    top = supabase.table("projects").select("*").order("score", desc=True).limit(10).execute().data
+    res_text = "🏆 **ТОП-10 ЛУЧШИХ ПРОЕКТОВ**\n"
+    res_text += "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+    if not top:
+        res_text += "Список пуст..."
+    for i, p in enumerate(top, 1):
+        res_text += f"{i}. **{p['name']}** — `{p['score']}` б.\n"
+    
+    await message.answer(res_text, reply_markup=main_kb(), parse_mode="Markdown")
 
 @router.message(F.text.in_(CATEGORIES.values()))
-async def show_category(message: Message):
+async def show_cat(message: Message):
     cat_key = [k for k, v in CATEGORIES.items() if v == message.text][0]
     projects = supabase.table("projects").select("*").eq("category", cat_key).order("score", desc=True).execute().data
     
     if not projects:
-        return await message.answer("В этой категории пока пусто.")
-    
+        return await message.answer("📍 В этой категории пока нет проектов.")
+
+    await message.answer(f"📍 **{message.text.upper()}**\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯", parse_mode="Markdown")
     for p in projects:
         await message.answer(
-            f"🔹 **{p['name']}**\n{p['description']}\n🏆 Рейтинг: `{p['score']}`",
-            reply_markup=project_inline(p['id']), parse_mode="Markdown"
+            f"🔹 **{p['name']}**\n\n{p['description']}\n\n🏆 Рейтинг: `{p['score']}`",
+            reply_markup=project_kb(p['id']), parse_mode="Markdown"
         )
 
 @router.callback_query(F.data.startswith("like_"))
 async def handle_like(call: CallbackQuery):
     p_id = int(call.data.split("_")[1])
-    # Проверка на дубликат
+    # Проверка повтора
     check = supabase.table("user_logs").select("id").eq("user_id", call.from_user.id).eq("project_id", p_id).eq("action_type", "like").execute()
     if check.data:
-        return await call.answer("❌ Вы уже ставили лайк этому проекту!", show_alert=True)
+        return await call.answer("❌ Вы уже ставили лайк!", show_alert=True)
     
-    update_score(p_id, 1)
+    new_s = update_score(p_id, 1)
     supabase.table("user_logs").insert({"user_id": call.from_user.id, "project_id": p_id, "action_type": "like"}).execute()
-    await call.answer("✅ Репутация повышена!")
+    await call.answer(f"❤️ Спасибо! Рейтинг: {new_s}", show_alert=False)
+    await call.message.edit_reply_markup(reply_markup=None) # Убираем кнопки после нажатия
 
+# --- REVIEW SYSTEM ---
 @router.callback_query(F.data.startswith("rev_"))
-async def review_start(call: CallbackQuery, state: FSMContext):
+async def rev_init(call: CallbackQuery, state: FSMContext):
     p_id = int(call.data.split("_")[1])
     check = supabase.table("user_logs").select("id").eq("user_id", call.from_user.id).eq("project_id", p_id).eq("action_type", "review").execute()
     if check.data:
-        return await call.answer("❌ Вы уже писали отзыв!", show_alert=True)
+        return await call.answer("❌ Вы уже оставляли отзыв!", show_alert=True)
     
     await state.update_data(p_id=p_id)
     await state.set_state(ReviewState.waiting_for_text)
-    await call.message.answer("📝 Напишите ваш отзыв о проекте:")
+    await call.message.answer("💬 **Напишите ваш отзыв:**\n(Пожалуйста, будьте конструктивны)", parse_mode="Markdown")
     await call.answer()
 
 @router.message(ReviewState.waiting_for_text)
-async def review_text(message: Message, state: FSMContext):
+async def rev_text(message: Message, state: FSMContext):
     await state.update_data(txt=message.text)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{i} ⭐", callback_data=f"rate_{i}")] for i in range(1, 6)
+        [InlineKeyboardButton(text="⭐"*i, callback_data=f"r_{i}")] for i in range(5, 0, -1)
     ])
     await state.set_state(ReviewState.waiting_for_rate)
-    await message.answer("Выберите оценку (1-5):", reply_markup=kb)
+    await message.answer("⭐ **Оцените проект:**", reply_markup=kb, parse_mode="Markdown")
 
-@router.callback_query(F.data.startswith("rate_"))
-async def review_finish(call: CallbackQuery, state: FSMContext):
-    rate = int(call.data.split("_")[1])
+@router.callback_query(F.data.startswith("r_"), ReviewState.waiting_for_rate)
+async def rev_done(call: CallbackQuery, state: FSMContext):
+    val = int(call.data.split("_")[1])
     data = await state.get_data()
-    p_id, txt = data['p_id'], data['txt']
+    diff = RATING_MAP[val]
     
-    score_change = RATING_MAP[rate]
-    update_score(p_id, score_change)
-    
+    new_s = update_score(data['p_id'], diff)
     supabase.table("user_logs").insert({
-        "user_id": call.from_user.id, "project_id": p_id, 
-        "action_type": "review", "review_text": txt, "rating_val": rate
+        "user_id": call.from_user.id, "project_id": data['p_id'],
+        "action_type": "review", "review_text": data['txt'], "rating_val": val
     }).execute()
-    
-    await call.message.edit_text(f"✅ Отзыв принят! Влияние на рейтинг: {score_change:+}")
+
+    # Уведомление админам
+    p_name = supabase.table("projects").select("name").eq("id", data['p_id']).single().execute().data['name']
+    await bot.send_message(ADMIN_CHAT_ID, 
+        f"📣 **Новый отзыв!**\nПроект: `{p_name}`\nОценка: `{val}/5` ({diff:+})\nОтзыв: _{data['txt']}_", 
+        parse_mode="Markdown")
+
+    await call.message.edit_text(f"✅ **Готово!**\nВаш отзыв учтен. Текущий рейтинг проекта: `{new_s}`", parse_mode="Markdown")
     await state.clear()
 
 async def main():
     logging.basicConfig(level=logging.INFO)
-    dp.include_router(router)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
