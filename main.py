@@ -45,9 +45,10 @@ class AccessMiddleware(BaseMiddleware):
         user = data.get("event_from_user")
         if not user or user.is_bot:
             return await handler(event, data)
-        res = supabase.table("banned_users").select("user_id").eq("user_id", user.id).execute()
-        if res.data:
-            return
+        # Игнорируем проверку базы для админа, чтобы всегда был доступ
+        if user.id != ADMIN_CHAT_ID:
+            res = supabase.table("banned_users").select("user_id").eq("user_id", user.id).execute()
+            if res.data: return
         return await handler(event, data)
 
 # --- КЛАВИАТУРЫ ---
@@ -62,47 +63,44 @@ def project_inline_kb(p_id):
         [InlineKeyboardButton(text="💬 Посмотреть отзывы", callback_data=f"viewrev_{p_id}")]
     ])
 
-# --- ОБРАБОТЧИК ОШИБОК ---
-@dp.error()
-async def error_handler(event: ErrorEvent):
-    logging.error(traceback.format_exc())
-    try:
-        await bot.send_message(ADMIN_CHAT_ID, f"⚠️ <b>Ошибка:</b>\n<code>{event.exception}</code>", parse_mode="HTML")
-    except: pass
-
-# --- АДМИН-КОМАНДЫ ---
+# --- АДМИН-КОМАНДЫ (ИСПРАВЛЕННЫЕ) ---
 
 @router.message(Command("add"))
 async def admin_add(message: Message):
-    if message.from_user.id != ADMIN_CHAT_ID: return
+    if message.from_user.id != ADMIN_CHAT_ID:
+        return
     try:
-        parts = [p.strip() for p in message.text.replace("/add", "").split("|")]
+        raw_text = message.text.split(maxsplit=1)[1]
+        parts = [p.strip() for p in raw_text.split("|")]
         cat, name, desc = parts[0], parts[1], parts[2]
         supabase.table("projects").insert({"name": name, "category": cat, "description": desc}).execute()
         await message.answer(f"✅ Проект <b>{name}</b> добавлен.", parse_mode="HTML")
-    except:
-        await message.answer("❌ Формат: <code>/add категория | Название | Описание</code>", parse_mode="HTML")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка! Формат:\n<code>/add категория | Название | Описание</code>\n\nТвоя ошибка: {e}", parse_mode="HTML")
 
 @router.message(Command("del"))
 async def admin_delete(message: Message):
     if message.from_user.id != ADMIN_CHAT_ID: return
-    name = message.text.replace("/del", "").strip()
-    if name:
+    try:
+        name = message.text.split(maxsplit=1)[1].strip()
         supabase.table("projects").delete().eq("name", name).execute()
         await message.answer(f"🗑 Проект <b>{name}</b> удален.", parse_mode="HTML")
+    except:
+        await message.answer("❌ Формат: <code>/del Название</code>")
 
 @router.message(Command("score"))
 async def admin_score(message: Message):
     if message.from_user.id != ADMIN_CHAT_ID: return
     try:
-        parts = [p.strip() for p in message.text.replace("/score", "").split("|")]
+        raw_text = message.text.split(maxsplit=1)[1]
+        parts = [p.strip() for p in raw_text.split("|")]
         name, val = parts[0], int(parts[1])
         res = supabase.table("projects").select("score").eq("name", name).single().execute().data
         new_score = res['score'] + val
         supabase.table("projects").update({"score": new_score}).eq("name", name).execute()
         await message.answer(f"⚖️ Рейтинг <b>{name}</b>: <code>{new_score}</code>", parse_mode="HTML")
-    except:
-        await message.answer("❌ Пример: <code>/score @name | 10</code>", parse_mode="HTML")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка! Формат:\n<code>/score Название | 10</code>\n\nТвоя ошибка: {e}", parse_mode="HTML")
 
 @router.message(Command("delrev"))
 async def admin_del_review(message: Message):
@@ -117,7 +115,7 @@ async def admin_del_review(message: Message):
             supabase.table("user_logs").delete().eq("id", log_id).execute()
             await message.answer(f"🗑 Отзыв №{log_id} удален.", parse_mode="HTML")
     except:
-        await message.answer("❌ Формат: <code>/delrev ID</code>", parse_mode="HTML")
+        await message.answer("❌ Формат: <code>/delrev ID</code>")
 
 @router.message(Command("ban"))
 async def admin_ban(message: Message):
@@ -137,7 +135,7 @@ async def admin_unban(message: Message):
         await message.answer(f"✅ Юзер <code>{uid}</code> разблокирован.", parse_mode="HTML")
     except: await message.answer("Пример: <code>/unban 12345</code>")
 
-# --- ЛОГИКА ПОЛЬЗОВАТЕЛЯ ---
+# --- ПОЛЬЗОВАТЕЛЬСКАЯ ЛОГИКА ---
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
@@ -162,15 +160,11 @@ async def show_cat(message: Message):
 async def view_reviews(call: CallbackQuery):
     p_id = call.data.split("_")[1]
     revs = supabase.table("user_logs").select("*").eq("project_id", p_id).eq("action_type", "review").order("created_at", desc=True).limit(5).execute().data
-    
-    if not revs:
-        return await call.answer("Отзывов пока нет.", show_alert=True)
-    
+    if not revs: return await call.answer("Отзывов пока нет.", show_alert=True)
     text = "<b>💬 ПОСЛЕДНИЕ ОТЗЫВЫ:</b>\n\n"
     for r in revs:
         stars = "⭐" * r['rating_val']
         text += f"{stars}\n<i>{r['review_text']}</i>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-    
     await call.message.answer(text, parse_mode="HTML")
     await call.answer()
 
@@ -203,7 +197,6 @@ async def rev_end(call: CallbackQuery, state: FSMContext):
     p = supabase.table("projects").select("score", "name").eq("id", data['p_id']).single().execute().data
     log = supabase.table("user_logs").insert({"user_id": call.from_user.id, "project_id": data['p_id'], "action_type": "review", "review_text": data['txt'], "rating_val": rate}).execute()
     supabase.table("projects").update({"score": p['score'] + diff}).eq("id", data['p_id']).execute()
-    
     log_id = log.data[0]['id']
     await bot.send_message(ADMIN_CHAT_ID, f"📢 <b>Новый отзыв (ID: {log_id})</b>\nПроект: {p['name']}\nТекст: <i>{data['txt']}</i>\nУдалить: <code>/delrev {log_id}</code>", parse_mode="HTML")
     await call.message.edit_text(f"✅ Отзыв опубликован!", parse_mode="HTML")
