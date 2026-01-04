@@ -45,40 +45,43 @@ class SecurityMiddleware(BaseMiddleware):
 
     async def __call__(self, handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
                        event: TelegramObject, data: Dict[str, Any]) -> Any:
+        # Проверяем, является ли событие сообщением или колбэком
         user = data.get("event_from_user")
         if not user or user.is_bot:
             return await handler(event, data)
+
+        # Достаем chat_id правильно
+        current_chat_id = None
+        if data.get("event_chat"):
+            current_chat_id = data["event_chat"].id
 
         # 1. Проверка на БАН
         is_banned = supabase.table("banned_users").select("user_id").eq("user_id", user.id).execute()
         if is_banned.data:
             return
 
-        # 2. АНТИСПАМ (кроме команды /start и админ-чата)
-        is_callback = isinstance(event, CallbackQuery)
-        is_message = isinstance(event, Message)
-        
-        # Разрешаем админам спамить в их чате
-        chat_id = event.message.chat.id if is_callback else event.chat.id
-        if chat_id == ADMIN_CHAT_ID:
+        # 2. АНТИСПАМ
+        # Если это админ в своем чате — разрешаем без задержек
+        if current_chat_id == ADMIN_CHAT_ID:
             return await handler(event, data)
 
         now = time.time()
         last_action = self.users_history.get(user.id, 0)
 
+        # Ограничение только для нажатий кнопок и текстовых команд
         if now - last_action < 60:
             remains = int(60 - (now - last_action))
-            if is_callback:
+            # Если это нажатие инлайн-кнопки
+            if isinstance(event, CallbackQuery):
                 await event.answer(f"⏳ Подождите {remains} сек!", show_alert=True)
-            else:
+            # Если это обычное сообщение (кнопка меню)
+            elif isinstance(event, Message):
                 await event.answer(f"⚠️ Слишком часто! Кнопки будут доступны через {remains} сек.")
             return
 
         self.users_history[user.id] = now
         return await handler(event, data)
-
-dp.update.outer_middleware(SecurityMiddleware())
-
+                           
 # --- FSM ---
 class ReviewState(StatesGroup):
     waiting_for_text = State()
