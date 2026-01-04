@@ -13,7 +13,7 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 
 # --- НАСТРОЙКИ ТОПИКОВ (Замени цифры на ID из ссылок) ---
-TOPIC_LOGS_ALL = 46  # Общий топик для ВСЕХ логов/отзывов
+TOPIC_LOGS_ALL = 0  # Общий топик для ВСЕХ логов/отзывов
 
 TOPICS_BY_CATEGORY = {
     "support_bots": 38,    # Топик для Ботов поддержки
@@ -85,11 +85,44 @@ def get_thread_id(message: Message) -> int:
     """Получает thread_id из сообщения или возвращает 0"""
     return message.message_thread_id if message.message_thread_id else 0
 
-# --- АДМИН-КОМАНДЫ (Работают в любом топике группы) ---
+# --- ФУНКЦИЯ ОТПРАВКИ ЛОГОВ ---
+async def send_log_to_topics(admin_text: str, category: str = None):
+    """Отправляет лог во все нужные топики"""
+    try:
+        # 1. Шлем в общий топик логов
+        if TOPIC_LOGS_ALL:
+            await bot.send_message(
+                ADMIN_GROUP_ID, 
+                admin_text, 
+                message_thread_id=TOPIC_LOGS_ALL, 
+                parse_mode="HTML"
+            )
+            logging.info(f"Лог отправлен в общий топик {TOPIC_LOGS_ALL}")
+        
+        # 2. Шлем в топик конкретной категории
+        if category:
+            cat_topic = TOPICS_BY_CATEGORY.get(category)
+            if cat_topic:
+                await bot.send_message(
+                    ADMIN_GROUP_ID, 
+                    admin_text, 
+                    message_thread_id=cat_topic, 
+                    parse_mode="HTML"
+                )
+                logging.info(f"Лог отправлен в топик категории {category}: {cat_topic}")
+        
+        # 3. Если общий топик не указан, отправляем в основной чат
+        elif not TOPIC_LOGS_ALL and ADMIN_GROUP_ID:
+            await bot.send_message(ADMIN_GROUP_ID, admin_text, parse_mode="HTML")
+            logging.info("Лог отправлен в основной админ-чат")
+            
+    except Exception as e:
+        logging.error(f"Ошибка отправки лога: {e}")
+
+# --- АДМИН-КОМАНДЫ ---
 
 @router.message(Command("add"))
 async def admin_add(message: Message, state: FSMContext):
-    """Добавить проект"""
     if not await is_user_admin(message.from_user.id): 
         return
         
@@ -122,7 +155,6 @@ async def admin_add(message: Message, state: FSMContext):
         
         cat, name, desc = [p.strip() for p in parts[:3]]
         
-        # Проверка категории
         if cat not in CATEGORIES:
             categories_list = "\n".join([f"- <code>{k}</code> ({v})" for k, v in CATEGORIES.items()])
             await message.reply(
@@ -132,18 +164,15 @@ async def admin_add(message: Message, state: FSMContext):
             )
             return
         
-        # Проверка существования проекта
         existing = supabase.table("projects").select("*").eq("name", name).execute()
         if existing.data:
             await message.reply(
-                f"⚠️ Проект <b>{name}</b> уже существует!\n"
-                f"Используйте другое название или /del {name}",
+                f"⚠️ Проект <b>{name}</b> уже существует!",
                 parse_mode="HTML",
                 message_thread_id=get_thread_id(message)
             )
             return
         
-        # Добавление проекта
         result = supabase.table("projects").insert({
             "name": name, 
             "category": cat, 
@@ -152,31 +181,35 @@ async def admin_add(message: Message, state: FSMContext):
         }).execute()
         
         if result.data:
+            # Отправляем лог
+            log_text = (f"📋 <b>Добавлен новый проект:</b>\n\n"
+                       f"🏷 Название: <b>{name}</b>\n"
+                       f"📂 Категория: <code>{cat}</code>\n"
+                       f"📝 Описание: {desc}\n"
+                       f"👤 Админ: @{message.from_user.username or message.from_user.id}")
+            
+            await send_log_to_topics(log_text, cat)
+            
             await message.reply(
-                f"✅ Проект <b>{name}</b> успешно добавлен!\n"
-                f"📂 Категория: <code>{cat}</code>\n"
-                f"📝 Описание: {desc}",
+                f"✅ Проект <b>{name}</b> успешно добавлен!",
                 parse_mode="HTML",
                 message_thread_id=get_thread_id(message)
             )
         else:
             await message.reply(
-                "❌ Ошибка при добавлении проекта. Попробуйте снова.",
+                "❌ Ошибка при добавлении проекта.",
                 message_thread_id=get_thread_id(message)
             )
             
     except Exception as e:
         logging.error(f"Ошибка в /add: {e}")
         await message.reply(
-            "❌ Ошибка при обработке команды. Формат:\n"
-            "<code>/add категория | Название | Описание</code>",
-            parse_mode="HTML",
+            "❌ Ошибка при обработке команды.",
             message_thread_id=get_thread_id(message)
         )
 
 @router.message(Command("del"))
 async def admin_delete(message: Message, state: FSMContext):
-    """Удалить проект"""
     if not await is_user_admin(message.from_user.id): 
         return
         
@@ -185,16 +218,13 @@ async def admin_delete(message: Message, state: FSMContext):
     try:
         if len(message.text.split()) < 2:
             await message.reply(
-                "❌ Укажите название проекта для удаления:\n"
-                "<code>/del Название проекта</code>",
-                parse_mode="HTML",
+                "❌ Укажите название проекта для удаления.",
                 message_thread_id=get_thread_id(message)
             )
             return
         
         name = message.text.split(maxsplit=1)[1].strip()
         
-        # Проверка существования проекта
         existing = supabase.table("projects").select("*").eq("name", name).execute()
         if not existing.data:
             await message.reply(
@@ -204,16 +234,30 @@ async def admin_delete(message: Message, state: FSMContext):
             )
             return
         
-        # Удаление проекта
-        result = supabase.table("projects").delete().eq("name", name).execute()
+        project = existing.data[0]
+        project_id = project['id']
+        category = project['category']
         
-        # Удаление связанных отзывов
-        project_id = existing.data[0]['id']
+        # Считаем сколько отзывов удаляем
+        reviews_count = supabase.table("user_logs").select("*").eq("project_id", project_id).execute()
+        reviews_num = len(reviews_count.data) if reviews_count.data else 0
+        
+        # Удаление проекта и связанных отзывов
+        supabase.table("projects").delete().eq("id", project_id).execute()
         supabase.table("user_logs").delete().eq("project_id", project_id).execute()
         
+        # Отправляем лог
+        log_text = (f"🗑 <b>Проект удален:</b>\n\n"
+                   f"🏷 Название: <b>{name}</b>\n"
+                   f"📂 Категория: <code>{category}</code>\n"
+                   f"📊 Удалено отзывов: {reviews_num}\n"
+                   f"👤 Админ: @{message.from_user.username or message.from_user.id}")
+        
+        await send_log_to_topics(log_text, category)
+        
         await message.reply(
-            f"🗑 Проект <b>{name}</b> успешно удален!\n"
-            f"📊 Удалено отзывов: {len(result.data) if result.data else 0}",
+            f"🗑 Проект <b>{name}</b> удален!\n"
+            f"📊 Удалено отзывов: {reviews_num}",
             parse_mode="HTML",
             message_thread_id=get_thread_id(message)
         )
@@ -221,13 +265,12 @@ async def admin_delete(message: Message, state: FSMContext):
     except Exception as e:
         logging.error(f"Ошибка в /del: {e}")
         await message.reply(
-            "❌ Ошибка при удалении проекта. Попробуйте снова.",
+            "❌ Ошибка при удалении проекта.",
             message_thread_id=get_thread_id(message)
         )
 
 @router.message(Command("score"))
 async def admin_score(message: Message, state: FSMContext):
-    """Изменить рейтинг проекта"""
     if not await is_user_admin(message.from_user.id): 
         return
         
@@ -237,9 +280,7 @@ async def admin_score(message: Message, state: FSMContext):
         if len(message.text.split()) < 2:
             await message.reply(
                 "❌ Неверный формат. Используйте:\n"
-                "<code>/score Название | число</code>\n\n"
-                "Пример: <code>/score Бот Помощи | 10</code>\n"
-                "Пример: <code>/score Бот Помощи | -5</code>",
+                "<code>/score Название | число</code>",
                 parse_mode="HTML",
                 message_thread_id=get_thread_id(message)
             )
@@ -250,10 +291,7 @@ async def admin_score(message: Message, state: FSMContext):
         
         if len(parts) < 2:
             await message.reply(
-                "❌ Неверный формат. Нужно два параметра через '|':\n"
-                "1. Название проекта\n"
-                "2. Число (положительное или отрицательное)",
-                parse_mode="HTML",
+                "❌ Неверный формат. Нужно два параметра.",
                 message_thread_id=get_thread_id(message)
             )
             return
@@ -270,7 +308,6 @@ async def admin_score(message: Message, state: FSMContext):
             )
             return
         
-        # Проверка существования проекта
         existing = supabase.table("projects").select("*").eq("name", name).execute()
         if not existing.data:
             await message.reply(
@@ -283,40 +320,38 @@ async def admin_score(message: Message, state: FSMContext):
         project = existing.data[0]
         old_score = project['score']
         new_score = old_score + val
+        category = project['category']
         
-        # Обновление рейтинга
-        result = supabase.table("projects").update({
-            "score": new_score
-        }).eq("id", project['id']).execute()
+        supabase.table("projects").update({"score": new_score}).eq("id", project['id']).execute()
         
-        if result.data:
-            change_symbol = "📈" if val > 0 else "📉" if val < 0 else "➡️"
-            await message.reply(
-                f"{change_symbol} Рейтинг проекта <b>{name}</b> изменен!\n\n"
-                f"🔢 Было: <b>{old_score}</b>\n"
-                f"🔢 Стало: <b>{new_score}</b>\n"
-                f"📊 Изменение: <code>{val:+d}</code>",
-                parse_mode="HTML",
-                message_thread_id=get_thread_id(message)
-            )
-        else:
-            await message.reply(
-                "❌ Ошибка при обновлении рейтинга.",
-                message_thread_id=get_thread_id(message)
-            )
+        # Отправляем лог
+        log_text = (f"⚖️ <b>Изменен рейтинг проекта:</b>\n\n"
+                   f"🏷 Название: <b>{name}</b>\n"
+                   f"📂 Категория: <code>{category}</code>\n"
+                   f"🔢 Было: <b>{old_score}</b>\n"
+                   f"🔢 Стало: <b>{new_score}</b>\n"
+                   f"📊 Изменение: <code>{val:+d}</code>\n"
+                   f"👤 Админ: @{message.from_user.username or message.from_user.id}")
+        
+        await send_log_to_topics(log_text, category)
+        
+        change_symbol = "📈" if val > 0 else "📉" if val < 0 else "➡️"
+        await message.reply(
+            f"{change_symbol} Рейтинг проекта <b>{name}</b> изменен!\n"
+            f"🔢 {old_score} → <b>{new_score}</b> ({val:+d})",
+            parse_mode="HTML",
+            message_thread_id=get_thread_id(message)
+        )
             
     except Exception as e:
         logging.error(f"Ошибка в /score: {e}")
         await message.reply(
-            "❌ Ошибка при обработке команды. Формат:\n"
-            "<code>/score Название | число</code>",
-            parse_mode="HTML",
+            "❌ Ошибка при обработке команды.",
             message_thread_id=get_thread_id(message)
         )
 
 @router.message(Command("delrev"))
 async def admin_delrev(message: Message, state: FSMContext):
-    """Удалить отзыв"""
     if not await is_user_admin(message.from_user.id): 
         return
         
@@ -325,10 +360,7 @@ async def admin_delrev(message: Message, state: FSMContext):
     try:
         if len(message.text.split()) < 2:
             await message.reply(
-                "❌ Укажите ID отзыва для удаления:\n"
-                "<code>/delrev 123</code>\n\n"
-                "ID отзыва можно взять из сообщения бота.",
-                parse_mode="HTML",
+                "❌ Укажите ID отзыва для удаления.",
                 message_thread_id=get_thread_id(message)
             )
             return
@@ -345,7 +377,6 @@ async def admin_delrev(message: Message, state: FSMContext):
             )
             return
         
-        # Проверка существования отзыва
         rev_result = supabase.table("user_logs").select("*").eq("id", log_id).execute()
         if not rev_result.data:
             await message.reply(
@@ -357,7 +388,6 @@ async def admin_delrev(message: Message, state: FSMContext):
         
         rev = rev_result.data[0]
         
-        # Получение информации о проекте
         project_result = supabase.table("projects").select("*").eq("id", rev['project_id']).execute()
         if not project_result.data:
             await message.reply(
@@ -368,25 +398,28 @@ async def admin_delrev(message: Message, state: FSMContext):
         
         project = project_result.data[0]
         old_score = project['score']
-        
-        # Вычисление нового рейтинга
         rating_change = RATING_MAP.get(rev['rating_val'], 0)
         new_score = old_score - rating_change
         
-        # Обновление рейтинга проекта
-        supabase.table("projects").update({
-            "score": new_score
-        }).eq("id", rev['project_id']).execute()
+        supabase.table("projects").update({"score": new_score}).eq("id", rev['project_id']).execute()
+        supabase.table("user_logs").delete().eq("id", log_id).execute()
         
-        # Удаление отзыва
-        result = supabase.table("user_logs").delete().eq("id", log_id).execute()
+        # Отправляем лог
+        log_text = (f"🗑 <b>Удален отзыв:</b>\n\n"
+                   f"🏷 Проект: <b>{project['name']}</b>\n"
+                   f"📂 Категория: <code>{project['category']}</code>\n"
+                   f"🆔 ID отзыва: <code>{log_id}</code>\n"
+                   f"⭐ Оценка: {rev['rating_val']}/5\n"
+                   f"📊 Изменение рейтинга: {rating_change:+d}\n"
+                   f"🔢 Новый рейтинг: {new_score}\n"
+                   f"👤 Удалил: @{message.from_user.username or message.from_user.id}")
+        
+        await send_log_to_topics(log_text, project['category'])
         
         await message.reply(
-            f"🗑 Отзыв <b>#{log_id}</b> успешно удален!\n\n"
+            f"🗑 Отзыв <b>#{log_id}</b> удален!\n"
             f"📁 Проект: <b>{project['name']}</b>\n"
-            f"⭐ Оценка: {rev['rating_val']}/5\n"
-            f"📊 Рейтинг проекта: {old_score} → {new_score} ({rating_change:+d})\n"
-            f"👤 Пользователь: {rev['user_id']}",
+            f"📊 Рейтинг: {old_score} → {new_score}",
             parse_mode="HTML",
             message_thread_id=get_thread_id(message)
         )
@@ -394,11 +427,11 @@ async def admin_delrev(message: Message, state: FSMContext):
     except Exception as e:
         logging.error(f"Ошибка в /delrev: {e}")
         await message.reply(
-            "❌ Ошибка при удалении отзыва. Проверьте ID.",
+            "❌ Ошибка при удалении отзыва.",
             message_thread_id=get_thread_id(message)
         )
 
-# --- ЛОГИКА ПОЛЬЗОВАТЕЛЯ (остается без изменений) ---
+# --- ЛОГИКА ПОЛЬЗОВАТЕЛЯ ---
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
@@ -462,14 +495,8 @@ async def rev_end(call: CallbackQuery, state: FSMContext):
                   f"Оценка: {rate}/5\n"
                   f"Удалить: <code>/delrev {log_id}</code>")
     
-    # 1. Шлем в общий топик логов
-    if TOPIC_LOGS_ALL:
-        await bot.send_message(ADMIN_GROUP_ID, admin_text, message_thread_id=TOPIC_LOGS_ALL, parse_mode="HTML")
-    
-    # 2. Шлем в топик конкретной категории
-    cat_topic = TOPICS_BY_CATEGORY.get(p['category'])
-    if cat_topic:
-        await bot.send_message(ADMIN_GROUP_ID, admin_text, message_thread_id=cat_topic, parse_mode="HTML")
+    # Используем новую функцию для отправки логов
+    await send_log_to_topics(admin_text, p['category'])
 
     await state.clear(); await call.answer()
 
