@@ -12,7 +12,18 @@ from aiogram.fsm.state import State, StatesGroup
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
-# --- НАСТРОЙКИ ---
+# --- НАСТРОЙКИ ТОПИКОВ (Замени цифры на ID из ссылок) ---
+TOPIC_LOGS_ALL = 0  # Общий топик для ВСЕХ логов/отзывов
+
+TOPICS_BY_CATEGORY = {
+    "support_bots": 38,    # Топик для Ботов поддержки
+    "support_admins": 41,  # Топик для Админов поддержки
+    "lot_channels": 39,    # Топик для Каналов лотов
+    "check_channels": 42,  # Топик для Каналов проверок
+    "kmbp_channels": 40    # Топик для Каналов КМБП
+}
+
+# --- ИНИЦИАЛИЗАЦИЯ ---
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN") 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -38,7 +49,7 @@ class ReviewState(StatesGroup):
     waiting_for_text = State()
     waiting_for_rate = State()
 
-# --- ПРОВЕРКА НА АДМИНА ---
+# --- ПРОВЕРКА ПРАВ (ПО ЧАТУ) ---
 async def is_user_admin(user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(chat_id=ADMIN_GROUP_ID, user_id=user_id)
@@ -50,10 +61,8 @@ async def is_user_admin(user_id: int) -> bool:
 class AccessMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         user = data.get("event_from_user")
-        if not user or user.is_bot:
-            return await handler(event, data)
-        if await is_user_admin(user.id):
-            return await handler(event, data)
+        if not user or user.is_bot: return await handler(event, data)
+        if await is_user_admin(user.id): return await handler(event, data)
         res = supabase.table("banned_users").select("user_id").eq("user_id", user.id).execute()
         if res.data: return
         return await handler(event, data)
@@ -70,7 +79,7 @@ def project_inline_kb(p_id):
         [InlineKeyboardButton(text="💬 Посмотреть отзывы", callback_data=f"viewrev_{p_id}")]
     ])
 
-# --- АДМИН-КОМАНДЫ (С ПОДДЕРЖКОЙ ТОПИКОВ) ---
+# --- АДМИН-КОМАНДЫ (Работают в любом топике группы) ---
 
 @router.message(Command("add"))
 async def admin_add(message: Message, state: FSMContext):
@@ -158,7 +167,7 @@ async def rev_start(call: CallbackQuery, state: FSMContext):
 
 @router.message(ReviewState.waiting_for_text)
 async def rev_text(message: Message, state: FSMContext):
-    if message.text.startswith("/"): return 
+    if message.text and message.text.startswith("/"): return 
     await state.update_data(txt=message.text)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⭐"*i, callback_data=f"st_{i}")] for i in range(5, 0, -1)])
     await state.set_state(ReviewState.waiting_for_rate)
@@ -168,22 +177,35 @@ async def rev_text(message: Message, state: FSMContext):
 async def rev_end(call: CallbackQuery, state: FSMContext):
     rate = int(call.data.split("_")[1]); data = await state.get_data(); p_id = data['p_id']
     old_rev = supabase.table("user_logs").select("*").eq("user_id", call.from_user.id).eq("project_id", p_id).eq("action_type", "review").execute()
-    p = supabase.table("projects").select("score", "name").eq("id", p_id).single().execute().data
+    p = supabase.table("projects").select("*").eq("id", p_id).single().execute().data
     
     if old_rev.data:
         new_score = p['score'] - RATING_MAP[old_rev.data[0]['rating_val']] + RATING_MAP[rate]
         supabase.table("user_logs").update({"review_text": data['txt'], "rating_val": rate}).eq("id", old_rev.data[0]['id']).execute()
-        res_txt = "обновлен"
+        res_txt = "обновлен"; log_id = old_rev.data[0]['id']
     else:
         new_score = p['score'] + RATING_MAP[rate]
-        supabase.table("user_logs").insert({"user_id": call.from_user.id, "project_id": p_id, "action_type": "review", "review_text": data['txt'], "rating_val": rate}).execute()
-        res_txt = "добавлен"
+        log = supabase.table("user_logs").insert({"user_id": call.from_user.id, "project_id": p_id, "action_type": "review", "review_text": data['txt'], "rating_val": rate}).execute()
+        res_txt = "добавлен"; log_id = log.data[0]['id']
 
     supabase.table("projects").update({"score": new_score}).eq("id", p_id).execute()
     await call.message.edit_text(f"✅ Отзыв успешно {res_txt}!", parse_mode="HTML")
     
-    # Отправка уведомления админам (если сообщение от юзера в ЛС, шлем в общую группу)
-    await bot.send_message(ADMIN_GROUP_ID, f"📢 <b>Отзыв {res_txt}:</b> {p['name']}\nТекст: {data['txt']}\nОценка: {rate}/5", parse_mode="HTML")
+    # ФОРМИРУЕМ ЛОГ
+    admin_text = (f"📢 <b>Отзыв {res_txt}:</b> {p['name']}\n"
+                  f"Текст: <i>{data['txt']}</i>\n"
+                  f"Оценка: {rate}/5\n"
+                  f"Удалить: <code>/delrev {log_id}</code>")
+    
+    # 1. Шлем в общий топик логов
+    if TOPIC_LOGS_ALL:
+        await bot.send_message(ADMIN_GROUP_ID, admin_text, message_thread_id=TOPIC_LOGS_ALL, parse_mode="HTML")
+    
+    # 2. Шлем в топик конкретной категории
+    cat_topic = TOPICS_BY_CATEGORY.get(p['category'])
+    if cat_topic:
+        await bot.send_message(ADMIN_GROUP_ID, admin_text, message_thread_id=cat_topic, parse_mode="HTML")
+
     await state.clear(); await call.answer()
 
 @router.callback_query(F.data.startswith("viewrev_"))
@@ -192,21 +214,21 @@ async def view_reviews(call: CallbackQuery):
     revs = supabase.table("user_logs").select("*").eq("project_id", p_id).eq("action_type", "review").order("created_at", desc=True).limit(5).execute().data
     if not revs: return await call.answer("Отзывов еще нет.", show_alert=True)
     text = "<b>💬 ПОСЛЕДНИЕ ОТЗЫВЫ:</b>\n\n"
-    for r in revs:
-        text += f"{'⭐' * r['rating_val']}\n<i>{r['review_text']}</i>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+    for r in revs: text += f"{'⭐' * r['rating_val']}\n<i>{r['review_text']}</i>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
     await call.message.answer(text, parse_mode="HTML"); await call.answer()
 
 @router.callback_query(F.data.startswith("like_"))
 async def handle_like(call: CallbackQuery):
     p_id = call.data.split("_")[1]
     check = supabase.table("user_logs").select("id").eq("user_id", call.from_user.id).eq("project_id", p_id).eq("action_type", "like").execute()
-    if check.data: return await call.answer("Вы уже голосовали!", show_alert=True)
+    if check.data: return await call.answer("Вы уже поддержали этот проект!", show_alert=True)
     res = supabase.table("projects").select("score").eq("id", p_id).single().execute().data
     supabase.table("projects").update({"score": res['score'] + 1}).eq("id", p_id).execute()
     supabase.table("user_logs").insert({"user_id": call.from_user.id, "project_id": p_id, "action_type": "like"}).execute()
     await call.answer("❤️ Голос учтен!")
 
 async def main():
+    logging.basicConfig(level=logging.INFO)
     dp.update.outer_middleware(AccessMiddleware())
     dp.include_router(router)
     await bot.delete_webhook(drop_pending_updates=True)
