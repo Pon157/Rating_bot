@@ -1154,8 +1154,23 @@ async def close_panel(call: CallbackQuery):
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()
-    top = supabase.table("projects").select("*").order("score", desc=True).limit(5).execute().data
+    # Проверяем бан
+    ban_result = supabase.table("banned_users")\
+        .select("*")\
+        .eq("user_id", message.from_user.id)\
+        .execute()
+    
+    if ban_result.data:
+        await message.answer(
+            f"🚫 <b>Вы заблокированы!</b>\n\n"
+            f"📝 Причина: <i>{ban_result.data[0].get('reason', 'Не указана')}</i>\n"
+            f"📅 Дата блокировки: {ban_result.data[0].get('banned_at', 'Неизвестно')[:10]}\n\n"
+            f"Для разблокировки обратитесь к администратору.",
+            parse_mode="HTML"
+        )
+        return
+    
+    # Остальной код команды start...
     
     # Стартовое сообщение с фото
     start_text = "<b>🌟 ДОБРО ПОЖАЛОВАТЬ В РЕЙТИНГ ПРОЕКТОВ КМБП!</b>\n\n"
