@@ -13,7 +13,7 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 
 # --- НАСТРОЙКИ ТОПИКОВ (Замени цифры на ID из ссылок) ---
-TOPIC_LOGS_ALL = 46 # Общий топик для ВСЕХ логов/отзывов
+TOPIC_LOGS_ALL = 0  # Общий топик для ВСЕХ логов/отзывов
 
 TOPICS_BY_CATEGORY = {
     "support_bots": 38,    # Топик для Ботов поддержки
@@ -49,6 +49,9 @@ class ReviewState(StatesGroup):
     waiting_for_text = State()
     waiting_for_rate = State()
 
+class AdminScoreState(StatesGroup):
+    waiting_for_reason = State()
+
 # --- ПРОВЕРКА ПРАВ (ПО ЧАТУ) ---
 async def is_user_admin(user_id: int) -> bool:
     try:
@@ -73,12 +76,30 @@ def main_kb():
     buttons = [[KeyboardButton(text=v)] for v in CATEGORIES.values()]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-def project_inline_kb(p_id):
+def project_card_kb(p_id):
+    """Чистая карточка проекта без кнопок"""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⭐ Оценить/Изменить", callback_data=f"rev_{p_id}"),
-         InlineKeyboardButton(text="❤️ Поддержать", callback_data=f"like_{p_id}")],
-        [InlineKeyboardButton(text="💬 Посмотреть отзывы", callback_data=f"viewrev_{p_id}"),
-         InlineKeyboardButton(text="📊 История изменений", callback_data=f"history_{p_id}")]
+        [InlineKeyboardButton(text="🔘 Открыть панель", callback_data=f"panel_{p_id}")]
+    ])
+
+def project_panel_kb(p_id):
+    """Полная панель действий"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="⭐ Оценить", callback_data=f"rev_{p_id}"),
+            InlineKeyboardButton(text="❤️ Поддержать", callback_data=f"like_{p_id}")
+        ],
+        [
+            InlineKeyboardButton(text="💬 Отзывы", callback_data=f"viewrev_{p_id}"),
+            InlineKeyboardButton(text="📊 История", callback_data=f"history_{p_id}")
+        ],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"back_{p_id}")]
+    ])
+
+def back_to_panel_kb(p_id):
+    """Кнопка назад к панели"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад к панели", callback_data=f"panel_{p_id}")]
     ])
 
 # --- ФУНКЦИЯ ОТПРАВКИ ЛОГОВ ---
@@ -127,9 +148,9 @@ async def admin_add(message: Message, state: FSMContext):
     try:
         if len(message.text.split()) < 2:
             await message.reply(
-                "Неверный формат команды.\n"
-                "Используйте: /add категория | Название | Описание\n\n"
-                "Пример: /add support_bots | Бот Помощи | Отвечает на вопросы",
+                "❌ Неверный формат. Используйте:\n"
+                "<code>/add категория | Название | Описание</code>\n\n"
+                "Пример: <code>/add support_bots | Бот Помощи | Отвечает на вопросы</code>",
                 parse_mode="HTML"
             )
             return
@@ -139,10 +160,10 @@ async def admin_add(message: Message, state: FSMContext):
         
         if len(parts) < 3:
             await message.reply(
-                "Неверный формат. Необходимо три параметра разделенных символом |\n\n"
-                "1. Категория проекта\n"
-                "2. Название проекта\n"
-                "3. Описание проекта",
+                "❌ Неверный формат. Нужно три параметра через '|':\n"
+                "1. Категория\n"
+                "2. Название\n"
+                "3. Описание",
                 parse_mode="HTML"
             )
             return
@@ -150,9 +171,9 @@ async def admin_add(message: Message, state: FSMContext):
         cat, name, desc = [p.strip() for p in parts[:3]]
         
         if cat not in CATEGORIES:
-            categories_list = "\n".join([f"- {k} ({v})" for k, v in CATEGORIES.items()])
+            categories_list = "\n".join([f"- <code>{k}</code> ({v})" for k, v in CATEGORIES.items()])
             await message.reply(
-                f"Неверная категория проекта.\n\nДоступные категории:\n{categories_list}",
+                f"❌ Неверная категория. Доступные:\n{categories_list}",
                 parse_mode="HTML"
             )
             return
@@ -160,7 +181,7 @@ async def admin_add(message: Message, state: FSMContext):
         existing = supabase.table("projects").select("*").eq("name", name).execute()
         if existing.data:
             await message.reply(
-                f"Проект с названием '{name}' уже существует в системе.",
+                f"⚠️ Проект <b>{name}</b> уже существует!",
                 parse_mode="HTML"
             )
             return
@@ -182,34 +203,32 @@ async def admin_add(message: Message, state: FSMContext):
                 "score_before": 0,
                 "score_after": 0,
                 "change_amount": 0,
-                "reason": "Создание нового проекта",
+                "reason": "Создание проекта",
                 "is_admin_action": True
             }).execute()
             
             # Отправляем лог
-            log_text = (
-                f"Добавлен новый проект:\n\n"
-                f"Название: {name}\n"
-                f"Категория: {cat}\n"
-                f"Описание: {desc}\n"
-                f"Администратор: @{message.from_user.username or message.from_user.id}"
-            )
+            log_text = (f"📋 <b>Добавлен новый проект:</b>\n\n"
+                       f"🏷 Название: <b>{name}</b>\n"
+                       f"📂 Категория: <code>{cat}</code>\n"
+                       f"📝 Описание: {desc}\n"
+                       f"👤 Админ: @{message.from_user.username or message.from_user.id}")
             
             await send_log_to_topics(log_text, cat)
             
             await message.reply(
-                f"Проект '{name}' успешно добавлен в систему.",
+                f"✅ Проект <b>{name}</b> успешно добавлен!",
                 parse_mode="HTML"
             )
         else:
             await message.reply(
-                "Ошибка при добавлении проекта в базу данных.",
+                "❌ Ошибка при добавлении проекта.",
             )
             
     except Exception as e:
-        logging.error(f"Ошибка в команде /add: {e}")
+        logging.error(f"Ошибка в /add: {e}")
         await message.reply(
-            "Произошла ошибка при обработке команды.",
+            "❌ Ошибка при обработке команды.",
         )
 
 @router.message(Command("del"))
@@ -222,8 +241,7 @@ async def admin_delete(message: Message, state: FSMContext):
     try:
         if len(message.text.split()) < 2:
             await message.reply(
-                "Укажите название проекта для удаления.\n"
-                "Формат: /del Название_проекта"
+                "❌ Укажите название проекта для удаления."
             )
             return
         
@@ -232,7 +250,7 @@ async def admin_delete(message: Message, state: FSMContext):
         existing = supabase.table("projects").select("*").eq("name", name).execute()
         if not existing.data:
             await message.reply(
-                f"Проект '{name}' не найден в системе.",
+                f"❌ Проект <b>{name}</b> не найден!",
                 parse_mode="HTML"
             )
             return
@@ -255,38 +273,36 @@ async def admin_delete(message: Message, state: FSMContext):
             "score_before": score,
             "score_after": 0,
             "change_amount": -score,
-            "reason": "Удаление проекта из системы",
+            "reason": "Удаление проекта",
             "is_admin_action": True
         }).execute()
         
-        # Удаление проекта и связанных данных
+        # Удаление проекта и связанных отзывов
         supabase.table("projects").delete().eq("id", project_id).execute()
         supabase.table("user_logs").delete().eq("project_id", project_id).execute()
         supabase.table("rating_history").delete().eq("project_id", project_id).execute()
         
         # Отправляем лог
-        log_text = (
-            f"Проект удален из системы:\n\n"
-            f"Название: {name}\n"
-            f"Категория: {category}\n"
-            f"Количество удаленных отзывов: {reviews_num}\n"
-            f"Финальный рейтинг: {score}\n"
-            f"Администратор: @{message.from_user.username or message.from_user.id}"
-        )
+        log_text = (f"🗑 <b>Проект удален:</b>\n\n"
+                   f"🏷 Название: <b>{name}</b>\n"
+                   f"📂 Категория: <code>{category}</code>\n"
+                   f"📊 Удалено отзывов: {reviews_num}\n"
+                   f"🔢 Финальный рейтинг: {score}\n"
+                   f"👤 Админ: @{message.from_user.username or message.from_user.id}")
         
         await send_log_to_topics(log_text, category)
         
         await message.reply(
-            f"Проект '{name}' удален из системы.\n"
-            f"Удалено отзывов: {reviews_num}\n"
-            f"Финальный рейтинг проекта: {score}",
+            f"🗑 Проект <b>{name}</b> удален!\n"
+            f"📊 Удалено отзывов: {reviews_num}\n"
+            f"🔢 Финальный рейтинг: {score}",
             parse_mode="HTML"
         )
         
     except Exception as e:
-        logging.error(f"Ошибка в команде /del: {e}")
+        logging.error(f"Ошибка в /del: {e}")
         await message.reply(
-            "Ошибка при удалении проекта.",
+            "❌ Ошибка при удалении проекта."
         )
 
 @router.message(Command("score"))
@@ -297,9 +313,9 @@ async def admin_score(message: Message, state: FSMContext):
     try:
         if len(message.text.split()) < 2:
             await message.reply(
-                "Неверный формат команды.\n"
-                "Используйте: /score Название_проекта | изменение_рейтинга | причина\n\n"
-                "Пример: /score Бот Помощи | 10 | Добавление новых функций",
+                "❌ Неверный формат. Используйте:\n"
+                "<code>/score Название | число</code>\n\n"
+                "Пример: <code>/score Бот Помощи | 10</code>",
                 parse_mode="HTML"
             )
             return
@@ -307,30 +323,19 @@ async def admin_score(message: Message, state: FSMContext):
         raw = message.text.split(maxsplit=1)[1]
         parts = raw.split("|")
         
-        if len(parts) < 3:
+        if len(parts) < 2:
             await message.reply(
-                "Неверный формат. Необходимо три параметра.\n\n"
-                "1. Название проекта\n"
-                "2. Изменение рейтинга (число)\n"
-                "3. Причина изменения",
+                "❌ Неверный формат. Нужно два параметра."
             )
             return
         
-        name = parts[0].strip()
-        val_str = parts[1].strip()
-        reason = parts[2].strip()
-        
-        if not reason or len(reason) < 3:
-            await message.reply(
-                "Причина изменения должна содержать минимум 3 символа.",
-            )
-            return
+        name, val_str = [p.strip() for p in parts[:2]]
         
         try:
             val = int(val_str)
         except ValueError:
             await message.reply(
-                f"'{val_str}' не является числом.",
+                f"❌ <b>{val_str}</b> не является числом!",
                 parse_mode="HTML"
             )
             return
@@ -338,16 +343,58 @@ async def admin_score(message: Message, state: FSMContext):
         existing = supabase.table("projects").select("*").eq("name", name).execute()
         if not existing.data:
             await message.reply(
-                f"Проект '{name}' не найден в системе.",
+                f"❌ Проект <b>{name}</b> не найден!",
                 parse_mode="HTML"
             )
             return
         
         project = existing.data[0]
-        project_id = project['id']
-        category = project['category']
-        old_score = project['score']
-        new_score = old_score + val
+        await state.update_data(
+            project_id=project['id'],
+            project_name=name,
+            category=project['category'],
+            old_score=project['score'],
+            change_amount=val
+        )
+        
+        await state.set_state(AdminScoreState.waiting_for_reason)
+        await message.reply(
+            f"📝 <b>Укажите причину изменения рейтинга для проекта <i>{name}</i>:</b>\n\n"
+            f"🔢 Текущий рейтинг: <b>{project['score']}</b>\n"
+            f"📊 Изменение: <code>{val:+d}</code>\n"
+            f"🔢 Новый рейтинг будет: <b>{project['score'] + val}</b>",
+            parse_mode="HTML"
+        )
+            
+    except Exception as e:
+        logging.error(f"Ошибка в /score: {e}")
+        await message.reply(
+            "❌ Ошибка при обработке команды."
+        )
+
+@router.message(AdminScoreState.waiting_for_reason)
+async def admin_score_reason(message: Message, state: FSMContext):
+    """Обработка причины изменения рейтинга"""
+    if message.text.startswith("/"):
+        await state.clear()
+        return
+    
+    data = await state.get_data()
+    reason = message.text.strip()
+    
+    if not reason:
+        await message.reply(
+            "❌ Причина не может быть пустой. Пожалуйста, укажите причину изменения."
+        )
+        return
+    
+    try:
+        project_id = data['project_id']
+        project_name = data['project_name']
+        category = data['category']
+        old_score = data['old_score']
+        change_amount = data['change_amount']
+        new_score = old_score + change_amount
         
         # Обновляем рейтинг проекта
         supabase.table("projects").update({"score": new_score}).eq("id", project_id).execute()
@@ -360,41 +407,39 @@ async def admin_score(message: Message, state: FSMContext):
             "change_type": "admin_change",
             "score_before": old_score,
             "score_after": new_score,
-            "change_amount": val,
+            "change_amount": change_amount,
             "reason": reason,
             "is_admin_action": True
         }).execute()
         
         # Отправляем лог
-        change_direction = "увеличен" if val > 0 else "уменьшен" if val < 0 else "не изменился"
-        log_text = (
-            f"Изменен рейтинг проекта:\n\n"
-            f"Название: {name}\n"
-            f"Категория: {category}\n"
-            f"Предыдущий рейтинг: {old_score}\n"
-            f"Новый рейтинг: {new_score}\n"
-            f"Изменение: {val:+d}\n"
-            f"Статус: рейтинг {change_direction}\n"
-            f"Причина: {reason}\n"
-            f"Администратор: @{message.from_user.username or message.from_user.id}"
-        )
+        log_text = (f"⚖️ <b>Изменен рейтинг проекта:</b>\n\n"
+                   f"🏷 Название: <b>{project_name}</b>\n"
+                   f"📂 Категория: <code>{category}</code>\n"
+                   f"🔢 Было: <b>{old_score}</b>\n"
+                   f"🔢 Стало: <b>{new_score}</b>\n"
+                   f"📊 Изменение: <code>{change_amount:+d}</code>\n"
+                   f"📝 Причина: <i>{reason}</i>\n"
+                   f"👤 Админ: @{message.from_user.username or message.from_user.id}")
         
         await send_log_to_topics(log_text, category)
         
+        change_symbol = "📈" if change_amount > 0 else "📉" if change_amount < 0 else "➡️"
         await message.reply(
-            f"Рейтинг проекта изменен.\n\n"
-            f"Проект: {name}\n"
-            f"Рейтинг: {old_score} → {new_score} ({val:+d})\n"
-            f"Причина: {reason}",
+            f"{change_symbol} <b>Рейтинг проекта изменен!</b>\n\n"
+            f"🏷 Проект: <b>{project_name}</b>\n"
+            f"🔢 {old_score} → <b>{new_score}</b> ({change_amount:+d})\n"
+            f"📝 Причина: <i>{reason}</i>",
             parse_mode="HTML"
         )
-            
+        
     except Exception as e:
-        logging.error(f"Ошибка в команде /score: {e}")
+        logging.error(f"Ошибка в обработке причины: {e}")
         await message.reply(
-            "Произошла ошибка при обработке команды.\n\n"
-            "Правильный формат: /score Название | число | причина",
+            "❌ Ошибка при сохранении изменений."
         )
+    
+    await state.clear()
 
 @router.message(Command("delrev"))
 async def admin_delrev(message: Message, state: FSMContext):
@@ -406,8 +451,7 @@ async def admin_delrev(message: Message, state: FSMContext):
     try:
         if len(message.text.split()) < 2:
             await message.reply(
-                "Укажите ID отзыва для удаления.\n"
-                "Формат: /delrev ID_отзыва"
+                "❌ Укажите ID отзыва для удаления."
             )
             return
         
@@ -417,7 +461,7 @@ async def admin_delrev(message: Message, state: FSMContext):
             log_id = int(log_id_str)
         except ValueError:
             await message.reply(
-                f"'{log_id_str}' не является числовым идентификатором.",
+                f"❌ <b>{log_id_str}</b> не является числовым ID!",
                 parse_mode="HTML"
             )
             return
@@ -425,7 +469,7 @@ async def admin_delrev(message: Message, state: FSMContext):
         rev_result = supabase.table("user_logs").select("*").eq("id", log_id).execute()
         if not rev_result.data:
             await message.reply(
-                f"Отзыв с ID #{log_id} не найден.",
+                f"❌ Отзыв <b>#{log_id}</b> не найден!",
                 parse_mode="HTML"
             )
             return
@@ -435,7 +479,7 @@ async def admin_delrev(message: Message, state: FSMContext):
         project_result = supabase.table("projects").select("*").eq("id", rev['project_id']).execute()
         if not project_result.data:
             await message.reply(
-                f"Проект отзыва #{log_id} не найден."
+                f"❌ Проект отзыва #{log_id} не найден!"
             )
             return
         
@@ -453,7 +497,7 @@ async def admin_delrev(message: Message, state: FSMContext):
             "score_before": old_score,
             "score_after": new_score,
             "change_amount": -rating_change,
-            "reason": f"Удаление отзыва #{log_id} (оценка пользователя: {rev['rating_val']}/5)",
+            "reason": f"Удаление отзыва #{log_id} (оценка: {rev['rating_val']}/5)",
             "is_admin_action": True,
             "related_review_id": log_id
         }).execute()
@@ -465,31 +509,29 @@ async def admin_delrev(message: Message, state: FSMContext):
         supabase.table("user_logs").delete().eq("id", log_id).execute()
         
         # Отправляем лог
-        log_text = (
-            f"Удален отзыв пользователя:\n\n"
-            f"Проект: {project['name']}\n"
-            f"Категория: {project['category']}\n"
-            f"ID отзыва: {log_id}\n"
-            f"Оценка пользователя: {rev['rating_val']}/5\n"
-            f"Изменение рейтинга проекта: {rating_change:+d}\n"
-            f"Новый рейтинг проекта: {new_score}\n"
-            f"Текст отзыва: {rev['review_text'][:150]}...\n"
-            f"Администратор: @{message.from_user.username or message.from_user.id}"
-        )
+        log_text = (f"🗑 <b>Удален отзыв:</b>\n\n"
+                   f"🏷 Проект: <b>{project['name']}</b>\n"
+                   f"📂 Категория: <code>{project['category']}</code>\n"
+                   f"🆔 ID отзыва: <code>{log_id}</code>\n"
+                   f"⭐ Оценка: {rev['rating_val']}/5\n"
+                   f"📊 Изменение рейтинга: {rating_change:+d}\n"
+                   f"🔢 Новый рейтинг: {new_score}\n"
+                   f"📝 Текст отзыва: <i>{rev['review_text'][:100]}...</i>\n"
+                   f"👤 Удалил: @{message.from_user.username or message.from_user.id}")
         
         await send_log_to_topics(log_text, project['category'])
         
         await message.reply(
-            f"Отзыв #{log_id} удален.\n"
-            f"Проект: {project['name']}\n"
-            f"Рейтинг: {old_score} → {new_score} ({rating_change:+d})",
+            f"🗑 Отзыв <b>#{log_id}</b> удален!\n"
+            f"📁 Проект: <b>{project['name']}</b>\n"
+            f"📊 Рейтинг: {old_score} → {new_score} ({rating_change:+d})",
             parse_mode="HTML"
         )
         
     except Exception as e:
-        logging.error(f"Ошибка в команде /delrev: {e}")
+        logging.error(f"Ошибка в /delrev: {e}")
         await message.reply(
-            "Ошибка при удалении отзыва.",
+            "❌ Ошибка при удалении отзыва."
         )
 
 # --- ЛОГИКА ПОЛЬЗОВАТЕЛЯ ---
@@ -498,14 +540,14 @@ async def admin_delrev(message: Message, state: FSMContext):
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     top = supabase.table("projects").select("*").order("score", desc=True).limit(5).execute().data
-    text = "ТОП-5 ПРОЕКТОВ\n"
+    text = "<b>🏆 ТОП-5 ПРОЕКТОВ КМБП</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
     if top:
         for i, p in enumerate(top, 1):
-            text += f"{i}. {p['name']} — {p['score']}\n"
+            text += f"{i}. <b>{p['name']}</b> — <code>{p['score']}</code>\n"
     else: 
-        text += "Список проектов пуст.\n"
+        text += "Список пуст.\n"
     
-    text += "\nВыберите категорию ниже для просмотра проектов"
+    text += "\n📊 <i>Нажмите на категорию ниже, чтобы увидеть все проекты</i>"
     
     await message.answer(text, reply_markup=main_kb(), parse_mode="HTML")
 
@@ -514,30 +556,58 @@ async def show_cat(message: Message):
     cat_key = [k for k, v in CATEGORIES.items() if v == message.text][0]
     data = supabase.table("projects").select("*").eq("category", cat_key).order("score", desc=True).execute().data
     if not data: 
-        await message.answer(f"В категории '{message.text}' нет проектов.")
+        await message.answer(f"В разделе '{message.text}' пусто.")
         return
     
     for p in data:
-        # Получаем последние изменения рейтинга
-        recent_changes = supabase.table("rating_history").select("*")\
-            .eq("project_id", p['id'])\
-            .order("created_at", desc=True)\
-            .limit(3)\
-            .execute().data
+        # Чистая карточка проекта
+        card = f"<b>{p['name']}</b>\n\n{p['description']}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+        card += f"📊 Текущий рейтинг: <b>{p['score']}</b>\n\n"
+        card += f"<i>Нажмите кнопку ниже для управления проектом</i>"
         
-        card = f"{p['name']}\n\n{p['description']}\n\n"
-        card += f"Текущий рейтинг: {p['score']}\n"
-        
-        if recent_changes:
-            card += f"\nПоследние изменения рейтинга:\n"
-            for change in recent_changes[:2]:
-                date = change['created_at'][:10] if change['created_at'] else ""
-                if change['is_admin_action']:
-                    card += f"+{change['change_amount']:+d} — {change['reason']} ({date})\n"
-                else:
-                    card += f"{change['change_amount']:+d} — {change['reason']} ({date})\n"
-        
-        await message.answer(card, reply_markup=project_inline_kb(p['id']), parse_mode="HTML")
+        await message.answer(card, reply_markup=project_card_kb(p['id']), parse_mode="HTML")
+
+@router.callback_query(F.data.startswith("panel_"))
+async def open_panel(call: CallbackQuery):
+    """Открывает панель управления проектом"""
+    p_id = call.data.split("_")[1]
+    
+    # Получаем информацию о проекте
+    project = supabase.table("projects").select("*").eq("id", p_id).single().execute().data
+    if not project:
+        await call.answer("Проект не найден.", show_alert=True)
+        return
+    
+    # Получаем последние изменения
+    recent_changes = supabase.table("rating_history").select("*")\
+        .eq("project_id", p_id)\
+        .order("created_at", desc=True)\
+        .limit(2)\
+        .execute().data
+    
+    text = f"<b>🔘 ПАНЕЛЬ УПРАВЛЕНИЯ</b>\n\n"
+    text += f"<b>{project['name']}</b>\n"
+    text += f"{project['description']}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+    text += f"📊 Текущий рейтинг: <b>{project['score']}</b>\n\n"
+    
+    if recent_changes:
+        text += f"<b>📈 Последние изменения:</b>\n"
+        for change in recent_changes:
+            date = change['created_at'][:10] if change['created_at'] else ""
+            symbol = "📈" if change['change_amount'] > 0 else "📉" if change['change_amount'] < 0 else "➡️"
+            text += f"{symbol} <code>{change['change_amount']:+d}</code> — {change['reason'][:50]}... ({date})\n"
+        text += f"\n"
+    
+    text += f"<i>Выберите действие:</i>"
+    
+    await call.message.edit_text(text, reply_markup=project_panel_kb(p_id), parse_mode="HTML")
+    await call.answer()
+
+@router.callback_query(F.data.startswith("back_"))
+async def back_to_panel(call: CallbackQuery):
+    """Возврат к панели из других разделов"""
+    p_id = call.data.split("_")[1]
+    await open_panel(call)
 
 @router.callback_query(F.data.startswith("rev_"))
 async def rev_start(call: CallbackQuery, state: FSMContext):
@@ -545,16 +615,29 @@ async def rev_start(call: CallbackQuery, state: FSMContext):
     check = supabase.table("user_logs").select("*").eq("user_id", call.from_user.id).eq("project_id", p_id).eq("action_type", "review").execute()
     await state.update_data(p_id=p_id)
     await state.set_state(ReviewState.waiting_for_text)
-    txt = "Введите новый текст отзыва:" if check.data else "Введите текст отзыва:"
-    await call.message.answer(txt, parse_mode="HTML"); await call.answer()
+    
+    project = supabase.table("projects").select("name").eq("id", p_id).single().execute().data
+    project_name = project['name'] if project else "Проект"
+    
+    txt = f"📝 <b>Изменение отзыва для проекта {project_name}</b>\n\nВведите новый текст отзыва:"
+    if not check.data:
+        txt = f"💬 <b>Новый отзыв для проекта {project_name}</b>\n\nВведите текст отзыва:"
+    
+    await call.message.edit_text(txt, parse_mode="HTML", reply_markup=back_to_panel_kb(p_id))
+    await call.answer()
 
 @router.message(ReviewState.waiting_for_text)
 async def rev_text(message: Message, state: FSMContext):
-    if message.text and message.text.startswith("/"): return 
+    if message.text and message.text.startswith("/"): 
+        return 
+    
     await state.update_data(txt=message.text)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⭐"*i, callback_data=f"st_{i}")] for i in range(5, 0, -1)])
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⭐"*i, callback_data=f"st_{i}")] for i in range(5, 0, -1)
+    ])
+    
     await state.set_state(ReviewState.waiting_for_rate)
-    await message.answer("Выберите оценку:", reply_markup=kb, parse_mode="HTML")
+    await message.answer("🌟 <b>Выберите оценку:</b>", reply_markup=kb, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("st_"), ReviewState.waiting_for_rate)
 async def rev_end(call: CallbackQuery, state: FSMContext):
@@ -572,7 +655,7 @@ async def rev_end(call: CallbackQuery, state: FSMContext):
         new_score = old_score + rating_change
         supabase.table("user_logs").update({"review_text": data['txt'], "rating_val": rate}).eq("id", old_rev.data[0]['id']).execute()
         res_txt = "обновлен"; log_id = old_rev.data[0]['id']
-        reason = f"Изменение оценки: {old_rev.data[0]['rating_val']}/5 → {rate}/5"
+        reason = f"Изменение отзыва: {old_rev.data[0]['rating_val']}/5 → {rate}/5"
     else:
         new_score = old_score + rating_change
         log = supabase.table("user_logs").insert({
@@ -583,7 +666,7 @@ async def rev_end(call: CallbackQuery, state: FSMContext):
             "rating_val": rate
         }).execute()
         res_txt = "добавлен"; log_id = log.data[0]['id']
-        reason = f"Новая оценка: {rate}/5"
+        reason = f"Новый отзыв: {rate}/5"
 
     supabase.table("projects").update({"score": new_score}).eq("id", p_id).execute()
     
@@ -601,38 +684,52 @@ async def rev_end(call: CallbackQuery, state: FSMContext):
         "related_review_id": log_id
     }).execute()
     
-    await call.message.edit_text(f"Отзыв {res_txt}.", parse_mode="HTML")
-    
-    # ФОРМИРУЕМ ЛОГ
-    admin_text = (
-        f"Отзыв {res_txt}:\n"
-        f"Проект: {p['name']}\n"
-        f"Пользователь: @{call.from_user.username or call.from_user.id}\n"
-        f"Текст: {data['txt']}\n"
-        f"Оценка: {rate}/5\n"
-        f"Изменение рейтинга: {rating_change:+d}\n"
-        f"Новый рейтинг: {new_score}\n"
-        f"Удалить отзыв: /delrev {log_id}"
+    await call.message.edit_text(
+        f"✅ <b>Отзыв успешно {res_txt}!</b>\n\n"
+        f"📊 Изменение рейтинга: <code>{rating_change:+d}</code>\n"
+        f"🔢 Новый рейтинг: <b>{new_score}</b>",
+        parse_mode="HTML",
+        reply_markup=back_to_panel_kb(p_id)
     )
     
+    # ФОРМИРУЕМ ЛОГ
+    admin_text = (f"📢 <b>Отзыв {res_txt}:</b> {p['name']}\n"
+                  f"Пользователь: @{call.from_user.username or call.from_user.id}\n"
+                  f"Текст: <i>{data['txt']}</i>\n"
+                  f"Оценка: {rate}/5\n"
+                  f"📊 Изменение рейтинга: {rating_change:+d}\n"
+                  f"🔢 Новый рейтинг: {new_score}\n"
+                  f"Удалить: <code>/delrev {log_id}</code>")
+    
+    # Используем новую функцию для отправки логов
     await send_log_to_topics(admin_text, p['category'])
 
-    await state.clear(); await call.answer()
+    await state.clear()
+    await call.answer()
 
 @router.callback_query(F.data.startswith("viewrev_"))
 async def view_reviews(call: CallbackQuery):
     p_id = call.data.split("_")[1]
     revs = supabase.table("user_logs").select("*").eq("project_id", p_id).eq("action_type", "review").order("created_at", desc=True).limit(5).execute().data
+    
+    project = supabase.table("projects").select("name").eq("id", p_id).single().execute().data
+    project_name = project['name'] if project else "Проект"
+    
     if not revs: 
-        await call.answer("Нет отзывов для этого проекта.", show_alert=True)
+        text = f"<b>💬 ОТЗЫВЫ ПРОЕКТА</b>\n<b>{project_name}</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n"
+        text += "📭 Отзывов еще нет\n"
+        await call.message.edit_text(text, parse_mode="HTML", reply_markup=back_to_panel_kb(p_id))
+        await call.answer()
         return
     
-    text = "ПОСЛЕДНИЕ ОТЗЫВЫ:\n\n"
+    text = f"<b>💬 ПОСЛЕДНИЕ ОТЗЫВЫ</b>\n<b>{project_name}</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n"
     for r in revs: 
         date = r['created_at'][:10] if r['created_at'] else ""
-        text += f"{'⭐' * r['rating_val']}\n{r['review_text']}\nДата: {date}\n\n"
+        stars = '⭐' * r['rating_val']
+        text += f"{stars}\n<i>{r['review_text']}</i>\n📅 {date}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
     
-    await call.message.answer(text, parse_mode="HTML"); await call.answer()
+    await call.message.edit_text(text, parse_mode="HTML", reply_markup=back_to_panel_kb(p_id))
+    await call.answer()
 
 @router.callback_query(F.data.startswith("history_"))
 async def view_history(call: CallbackQuery):
@@ -652,26 +749,27 @@ async def view_history(call: CallbackQuery):
         .limit(10)\
         .execute().data
     
+    text = f"<b>📊 ИСТОРИЯ ИЗМЕНЕНИЙ</b>\n<b>{project['name']}</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n"
+    
     if not history:
-        await call.answer("Нет истории изменений.", show_alert=True)
-        return
+        text += "📭 История изменений пуста\n"
+    else:
+        for i, change in enumerate(history, 1):
+            date_time = change['created_at'][:16] if change['created_at'] else ""
+            
+            if change['is_admin_action']:
+                actor = f"👤 Админ: {change['admin_username'] or change['admin_id']}"
+            else:
+                actor = f"👤 Пользователь: {change['username'] or change['user_id']}"
+            
+            symbol = "📈" if change['change_amount'] > 0 else "📉" if change['change_amount'] < 0 else "➡️"
+            
+            text += f"{i}. {symbol} <b>{change['score_before']} → {change['score_after']}</b> ({change['change_amount']:+d})\n"
+            text += f"   📝 {change['reason'][:50]}{'...' if len(change['reason']) > 50 else ''}\n"
+            text += f"   {actor}\n"
+            text += f"   📅 {date_time}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
     
-    text = f"ИСТОРИЯ ИЗМЕНЕНИЙ\n{project['name']}\n\n"
-    
-    for i, change in enumerate(history, 1):
-        date_time = change['created_at'][:16] if change['created_at'] else ""
-        
-        if change['is_admin_action']:
-            actor = f"Администратор: {change['admin_username'] or change['admin_id']}"
-        else:
-            actor = f"Пользователь: {change['username'] or change['user_id']}"
-        
-        text += f"{i}. {change['score_before']} → {change['score_after']} ({change['change_amount']:+d})\n"
-        text += f"   Причина: {change['reason']}\n"
-        text += f"   {actor}\n"
-        text += f"   Дата: {date_time}\n\n"
-    
-    await call.message.answer(text, parse_mode="HTML")
+    await call.message.edit_text(text, parse_mode="HTML", reply_markup=back_to_panel_kb(p_id))
     await call.answer()
 
 @router.callback_query(F.data.startswith("like_"))
@@ -679,7 +777,7 @@ async def handle_like(call: CallbackQuery):
     p_id = call.data.split("_")[1]
     check = supabase.table("user_logs").select("id").eq("user_id", call.from_user.id).eq("project_id", p_id).eq("action_type", "like").execute()
     if check.data: 
-        await call.answer("Вы уже поддерживали этот проект.", show_alert=True)
+        await call.answer("Вы уже поддержали этот проект!", show_alert=True)
         return
     
     # Получаем текущий рейтинг
@@ -710,11 +808,34 @@ async def handle_like(call: CallbackQuery):
         "score_before": old_score,
         "score_after": new_score,
         "change_amount": 1,
-        "reason": "Поддержка пользователя",
+        "reason": "Лайк от пользователя",
         "is_admin_action": False
     }).execute()
     
-    await call.answer("Ваш голос учтен.")
+    # Обновляем панель с новым рейтингом
+    recent_changes = supabase.table("rating_history").select("*")\
+        .eq("project_id", p_id)\
+        .order("created_at", desc=True)\
+        .limit(2)\
+        .execute().data
+    
+    text = f"<b>🔘 ПАНЕЛЬ УПРАВЛЕНИЯ</b>\n\n"
+    text += f"<b>{project['name']}</b>\n"
+    text += f"{project['description']}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+    text += f"📊 Текущий рейтинг: <b>{new_score}</b> (+1)\n\n"
+    
+    if recent_changes:
+        text += f"<b>📈 Последние изменения:</b>\n"
+        for change in recent_changes:
+            date = change['created_at'][:10] if change['created_at'] else ""
+            symbol = "📈" if change['change_amount'] > 0 else "📉" if change['change_amount'] < 0 else "➡️"
+            text += f"{symbol} <code>{change['change_amount']:+d}</code> — {change['reason'][:50]}... ({date})\n"
+        text += f"\n"
+    
+    text += f"<i>Выберите действие:</i>"
+    
+    await call.message.edit_text(text, reply_markup=project_panel_kb(p_id), parse_mode="HTML")
+    await call.answer("❤️ Голос учтен!")
 
 async def main():
     logging.basicConfig(level=logging.INFO)
