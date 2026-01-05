@@ -69,10 +69,44 @@ async def is_user_admin(user_id: int) -> bool:
 class AccessMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         user = data.get("event_from_user")
-        if not user or user.is_bot: return await handler(event, data)
-        if await is_user_admin(user.id): return await handler(event, data)
-        res = supabase.table("banned_users").select("user_id").eq("user_id", user.id).execute()
-        if res.data: return
+        
+        # Проверяем, что это сообщение от пользователя (не от бота)
+        if not user or user.is_bot: 
+            return await handler(event, data)
+        
+        # Проверяем, является ли пользователь админом
+        if await is_user_admin(user.id): 
+            return await handler(event, data)
+        
+        # Проверяем, забанен ли пользователь
+        try:
+            res = supabase.table("banned_users")\
+                .select("user_id, reason")\
+                .eq("user_id", user.id)\
+                .execute()
+            
+            # Если пользователь найден в таблице banned_users
+            if res.data:
+                # Показываем сообщение о бане, если это Message
+                if isinstance(event, Message):
+                    await event.answer(
+                        f"🚫 Вы заблокированы!\n"
+                        f"📝 Причина: {res.data[0].get('reason', 'Не указана')}\n\n"
+                        f"Для разблокировки обратитесь к администратору.",
+                        parse_mode="HTML"
+                    )
+                # Или просто отвечаем на CallbackQuery
+                elif isinstance(event, CallbackQuery):
+                    await event.answer(
+                        "🚫 Вы заблокированы!",
+                        show_alert=True
+                    )
+                return  # Блокируем выполнение handler
+        
+        except Exception as e:
+            logging.error(f"Ошибка проверки бана: {e}")
+        
+        # Если пользователь не забанен, пропускаем
         return await handler(event, data)
 
 # --- КЛАВИАТУРЫ ---
@@ -207,7 +241,298 @@ async def find_project_by_name(name: str):
         logging.error(f"Ошибка поиска проекта: {e}")
     return None
 
-# --- АДМИН-КОМАНДЫ (только в админ-чате) ---
+# --- КОМАНДЫ УПРАВЛЕНИЯ БАНОМ ---
+
+@router.message(Command("ban"))
+async def admin_ban(message: Message):
+    """Забанить пользователя"""
+    if not await is_user_admin(message.from_user.id): 
+        return
+    
+    try:
+        if len(message.text.split()) < 2:
+            await message.reply(
+                "❌ Неверный формат. Используйте:\n"
+                "<code>/ban ID_пользователя [причина]</code>\n\n"
+                "Пример: <code>/ban 123456789 Нарушение правил</code>",
+                parse_mode="HTML"
+            )
+            return
+        
+        parts = message.text.split(maxsplit=2)
+        user_id_str = parts[1]
+        reason = parts[2] if len(parts) > 2 else "Без указания причины"
+        
+        try:
+            user_id = int(user_id_str)
+        except ValueError:
+            await message.reply(
+                f"❌ <b>{user_id_str}</b> не является числовым ID пользователя!",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Проверяем, не админ ли это
+        if await is_user_admin(user_id):
+            await message.reply(
+                "❌ Нельзя забанить администратора!",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Проверяем, не забанен ли уже
+        existing = supabase.table("banned_users")\
+            .select("*")\
+            .eq("user_id", user_id)\
+            .execute()
+        
+        if existing.data:
+            await message.reply(
+                f"⚠️ Пользователь <code>{user_id}</code> уже забанен!",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Баним пользователя
+        result = supabase.table("banned_users").insert({
+            "user_id": user_id,
+            "banned_by": message.from_user.id,
+            "banned_by_username": message.from_user.username,
+            "reason": reason,
+            "banned_at": "now()"
+        }).execute()
+        
+        if result.data:
+            # Отправляем лог
+            log_text = (f"🚫 <b>Пользователь забанен:</b>\n\n"
+                       f"🆔 ID: <code>{user_id}</code>\n"
+                       f"📝 Причина: <i>{reason}</i>\n"
+                       f"👮 Админ: @{message.from_user.username or message.from_user.id}")
+            
+            await send_log_to_topics(log_text)
+            
+            await message.reply(
+                f"🚫 Пользователь <code>{user_id}</code> забанен!\n"
+                f"📝 Причина: <i>{reason}</i>",
+                parse_mode="HTML"
+            )
+        else:
+            await message.reply(
+                "❌ Ошибка при добавлении в бан-лист."
+            )
+            
+    except Exception as e:
+        logging.error(f"Ошибка в /ban: {e}")
+        await message.reply(
+            "❌ Ошибка при выполнении команды."
+        )
+
+@router.message(Command("unban"))
+async def admin_unban(message: Message):
+    """Разбанить пользователя"""
+    if not await is_user_admin(message.from_user.id): 
+        return
+    
+    try:
+        if len(message.text.split()) < 2:
+            await message.reply(
+                "❌ Неверный формат. Используйте:\n"
+                "<code>/unban ID_пользователя</code>\n\n"
+                "Пример: <code>/unban 123456789</code>",
+                parse_mode="HTML"
+            )
+            return
+        
+        user_id_str = message.text.split()[1]
+        
+        try:
+            user_id = int(user_id_str)
+        except ValueError:
+            await message.reply(
+                f"❌ <b>{user_id_str}</b> не является числовым ID пользователя!",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Проверяем, есть ли пользователь в бане
+        existing = supabase.table("banned_users")\
+            .select("*")\
+            .eq("user_id", user_id)\
+            .execute()
+        
+        if not existing.data:
+            await message.reply(
+                f"⚠️ Пользователь <code>{user_id}</code> не находится в бане!",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Удаляем из бана
+        supabase.table("banned_users")\
+            .delete()\
+            .eq("user_id", user_id)\
+            .execute()
+        
+        # Отправляем лог
+        log_text = (f"✅ <b>Пользователь разбанен:</b>\n\n"
+                   f"🆔 ID: <code>{user_id}</code>\n"
+                   f"👮 Админ: @{message.from_user.username or message.from_user.id}")
+        
+        await send_log_to_topics(log_text)
+        
+        await message.reply(
+            f"✅ Пользователь <code>{user_id}</code> разбанен!",
+            parse_mode="HTML"
+        )
+            
+    except Exception as e:
+        logging.error(f"Ошибка в /unban: {e}")
+        await message.reply(
+            "❌ Ошибка при выполнении команды."
+        )
+
+@router.message(Command("banlist"))
+async def admin_banlist(message: Message):
+    """Показать список забаненных пользователей"""
+    if not await is_user_admin(message.from_user.id): 
+        return
+    
+    try:
+        banned_users = supabase.table("banned_users")\
+            .select("*")\
+            .order("banned_at", desc=True)\
+            .execute().data
+        
+        if not banned_users:
+            await message.reply("📭 Список забаненных пользователей пуст.")
+            return
+        
+        text = "<b>🚫 СПИСОК ЗАБАНЕННЫХ ПОЛЬЗОВАТЕЛЕЙ</b>\n\n"
+        
+        for i, ban in enumerate(banned_users, 1):
+            # Форматируем дату
+            banned_at = ban['banned_at'][:19] if ban['banned_at'] else "Неизвестно"
+            
+            text += f"<b>{i}. ID:</b> <code>{ban['user_id']}</code>\n"
+            text += f"   <b>Причина:</b> <i>{ban['reason']}</i>\n"
+            text += f"   <b>Забанен:</b> {banned_at}\n"
+            text += f"   <b>Админ:</b> {ban['banned_by_username'] or ban['banned_by']}\n"
+            text += f"   ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+        
+        text += f"\n📊 Всего забанено: <b>{len(banned_users)}</b> пользователей"
+        
+        # Разбиваем на части если слишком длинное
+        if len(text) > 4000:
+            parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
+            for part in parts:
+                await message.answer(part, parse_mode="HTML")
+        else:
+            await message.reply(text, parse_mode="HTML")
+        
+    except Exception as e:
+        logging.error(f"Ошибка в /banlist: {e}")
+        await message.reply(
+            "❌ Ошибка при получении списка банов."
+        )
+
+@router.message(Command("mystatus"))
+async def check_my_status(message: Message):
+    """Проверить свой статус (админ/бан)"""
+    user_id = message.from_user.id
+    
+    # Проверяем бан
+    ban_result = supabase.table("banned_users")\
+        .select("*")\
+        .eq("user_id", user_id)\
+        .execute()
+    
+    # Проверяем админку
+    is_admin = await is_user_admin(user_id)
+    
+    text = f"<b>👤 ВАШ СТАТУС</b>\n\n"
+    text += f"🆔 ID: <code>{user_id}</code>\n"
+    text += f"👤 Username: @{message.from_user.username or 'Нет'}\n"
+    text += f"📛 Имя: {message.from_user.first_name or ''} {message.from_user.last_name or ''}\n"
+    text += f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+    
+    if is_admin:
+        text += "✅ <b>Статус: АДМИНИСТРАТОР</b>\n"
+        text += "Вы имеете доступ ко всем командам управления."
+    elif ban_result.data:
+        text += "🚫 <b>Статус: ЗАБЛОКИРОВАН</b>\n"
+        text += f"📝 Причина: <i>{ban_result.data[0].get('reason', 'Не указана')}</i>\n"
+        if ban_result.data[0].get('banned_at'):
+            text += f"📅 Дата блокировки: {ban_result.data[0].get('banned_at')[:10]}"
+    else:
+        text += "✅ <b>Статус: ПОЛЬЗОВАТЕЛЬ</b>\n"
+        text += "Вы можете оставлять отзывы и ставить лайки."
+    
+    await message.reply(text, parse_mode="HTML")
+
+@router.message(Command("finduser"))
+async def admin_find_user(message: Message):
+    """Найти информацию о пользователе"""
+    if not await is_user_admin(message.from_user.id): 
+        return
+    
+    try:
+        if len(message.text.split()) < 2:
+            await message.reply(
+                "❌ Неверный формат. Используйте:\n"
+                "<code>/finduser ID_пользователя</code>\n\n"
+                "Пример: <code>/finduser 123456789</code>",
+                parse_mode="HTML"
+            )
+            return
+        
+        query = message.text.split(maxsplit=1)[1].strip()
+        
+        try:
+            user_id = int(query)
+            # Ищем по ID в banned_users
+            ban_result = supabase.table("banned_users")\
+                .select("*")\
+                .eq("user_id", user_id)\
+                .execute()
+        except ValueError:
+            # Если не число, ищем в логах
+            user_logs = supabase.table("user_logs")\
+                .select("user_id")\
+                .execute()
+            
+            # Это упрощенный поиск
+            user_id = None
+            ban_result = None
+        
+        text = f"<b>🔍 ПОИСК ПОЛЬЗОВАТЕЛЯ</b>\n\n"
+        text += f"🔎 Запрос: <code>{query}</code>\n"
+        text += f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+        
+        if ban_result and ban_result.data:
+            ban = ban_result.data[0]
+            text += f"🚫 <b>СТАТУС: ЗАБАНЕН</b>\n\n"
+            text += f"🆔 ID: <code>{ban['user_id']}</code>\n"
+            text += f"📝 Причина: <i>{ban['reason']}</i>\n"
+            if ban.get('banned_at'):
+                text += f"📅 Дата: {ban['banned_at'][:10]}\n"
+            text += f"👮 Админ: {ban['banned_by_username'] or ban['banned_by']}\n\n"
+            text += f"<i>Используйте</i> <code>/unban {ban['user_id']}</code> <i>для разблокировки</i>"
+        elif user_id:
+            text += f"✅ <b>СТАТУС: НЕ ЗАБАНЕН</b>\n\n"
+            text += f"🆔 ID: <code>{user_id}</code>\n\n"
+            text += f"<i>Используйте</i> <code>/ban {user_id} причина</code> <i>для блокировки</i>"
+        else:
+            text += "Пользователь не найден."
+        
+        await message.reply(text, parse_mode="HTML")
+        
+    except Exception as e:
+        logging.error(f"Ошибка в /finduser: {e}")
+        await message.reply(
+            "❌ Ошибка при поиске пользователя."
+        )
+
+# --- ОСНОВНЫЕ АДМИН-КОМАНДЫ ---
 
 @router.message(Command("add"))
 async def admin_add(message: Message, state: FSMContext):
@@ -607,10 +932,10 @@ async def admin_delrev(message: Message, state: FSMContext):
             "❌ Ошибка при удалении отзыва."
         )
 
-# --- НОВЫЕ АДМИН-КОМАНДЫ ДЛЯ УПРАВЛЕНИЯ ПРОЕКТАМИ ---
+# --- ДОПОЛНИТЕЛЬНЫЕ АДМИН-КОМАНДЫ ---
 
 @router.message(Command("editdesc"))
-async def admin_edit_desc(message: Message, state: FSMContext):
+async def admin_edit_desc(message: Message):
     """Изменить описание проекта"""
     if not await is_user_admin(message.from_user.id): 
         return
@@ -917,20 +1242,32 @@ async def admin_list_projects(message: Message):
             "❌ Ошибка при получении списка проектов."
         )
 
-@router.callback_query(F.data == "close_panel")
-async def close_panel(call: CallbackQuery):
-    """Закрытие панели - удаление сообщения с панелью"""
-    await call.message.delete()
-    await call.answer("Панель закрыта")
-
 # --- ЛОГИКА ПОЛЬЗОВАТЕЛЯ ---
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    top = supabase.table("projects").select("*").order("score", desc=True).limit(5).execute().data
     
-    # Стартовое сообщение с фото
+    # Проверяем бан
+    ban_result = supabase.table("banned_users")\
+        .select("*")\
+        .eq("user_id", message.from_user.id)\
+        .execute()
+    
+    if ban_result.data:
+        await message.answer(
+            f"🚫 <b>Вы заблокированы!</b>\n\n"
+            f"📝 Причина: <i>{ban_result.data[0].get('reason', 'Не указана')}</i>\n"
+            f"📅 Дата блокировки: {ban_result.data[0].get('banned_at', 'Неизвестно')[:10]}\n\n"
+            f"Для разблокировки обратитесь к администратору.",
+            parse_mode="HTML"
+        )
+        return
+    
+    # Получаем топ проектов
+    top_projects = supabase.table("projects").select("*").order("score", desc=True).limit(5).execute().data
+    
+    # Стартовое сообщение
     start_text = "<b>🌟 ДОБРО ПОЖАЛОВАТЬ В РЕЙТИНГ ПРОЕКТОВ КМБП!</b>\n\n"
     start_text += "Здесь вы можете оценивать проекты, оставлять отзывы и следить за рейтингом лучших проектов сообщества.\n\n"
     start_text += "🎯 <b>Как это работает:</b>\n"
@@ -939,9 +1276,9 @@ async def cmd_start(message: Message, state: FSMContext):
     start_text += "• Следите за изменениями рейтинга\n\n"
     start_text += "Для комфортной работы мы предлагаем Вам подписаться на наш новостной канал https://t.me/ratingkmbp. \n\n"
     
-    if top:
+    if top_projects:
         start_text += "<b>🏆 ТОП-5 ПРОЕКТОВ:</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-        for i, p in enumerate(top, 1):
+        for i, p in enumerate(top_projects, 1):
             start_text += f"{i}. <b>{p['name']}</b> — <code>{p['score']}</code>\n"
     else: 
         start_text += "<b>🏆 ТОП-5 ПРОЕКТОВ:</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
@@ -1266,6 +1603,12 @@ async def handle_like(call: CallbackQuery):
     # Обновляем панель с новым рейтингом
     await open_panel(call)
     await call.answer("❤️ Голос учтен!")
+
+@router.callback_query(F.data == "close_panel")
+async def close_panel(call: CallbackQuery):
+    """Закрытие панели - удаление сообщения с панелью"""
+    await call.message.delete()
+    await call.answer("Панель закрыта")
 
 async def main():
     logging.basicConfig(level=logging.INFO)
