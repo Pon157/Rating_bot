@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 TOPIC_LOGS_ALL = 46  # Общий топик для ВСЕХ логов/отзывов
 
 TOPICS_BY_CATEGORY = {
-    "support_bots": 38,    # Топик для Ботов поддержки
+    "support_bots": 38,    # Топик для Ботов поддержки 1
     "support_admins": 41,  # Топик для Админов поддержки
     "lot_channels": 39,    # Топик для Каналов лотов
     "check_channels": 42,  # Топик для Каналов проверок
