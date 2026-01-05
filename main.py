@@ -13,10 +13,10 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 
 # --- НАСТРОЙКИ ТОПИКОВ (Замени цифры на ID из ссылок) ---
-TOPIC_LOGS_ALL = 46  # Общий топик для ВСЕХ логов/отзывов
+TOPIC_LOGS_ALL = 0  # Общий топик для ВСЕХ логов/отзывов
 
 TOPICS_BY_CATEGORY = {
-    "support_bots": 38,    # Топик для Ботов поддержки 1
+    "support_bots": 38,    # Топик для Ботов поддержки
     "support_admins": 41,  # Топик для Админов поддержки
     "lot_channels": 39,    # Топик для Каналов лотов
     "check_channels": 42,  # Топик для Каналов проверок
@@ -937,7 +937,6 @@ async def cmd_start(message: Message, state: FSMContext):
     start_text += "• Выберите категорию проекта\n"
     start_text += "• Оцените проект или поставьте лайк\n"
     start_text += "• Следите за изменениями рейтинга\n\n"
-    start_text += "Для комфортной работы мы предлагаем Вам подписаться на наш новостной канал https://t.me/ratingkmbp. \n\n"
     
     if top:
         start_text += "<b>🏆 ТОП-5 ПРОЕКТОВ:</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
@@ -1207,7 +1206,7 @@ async def view_history(call: CallbackQuery):
             if change['is_admin_action']:
                 actor = f"👤 Админ: {change['admin_username'] or change['admin_id']}"
             else:
-                actor = f"👤 Пользователь"
+                actor = f"👤 Пользователь: {change['username'] or change['user_id']}"
             
             symbol = "📈" if change['change_amount'] > 0 else "📉" if change['change_amount'] < 0 else "➡️"
             
