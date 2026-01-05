@@ -5,15 +5,16 @@ from aiogram import Bot, Dispatcher, Router, F, BaseMiddleware
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton
+    ReplyKeyboardMarkup, KeyboardButton, InputMediaPhoto, FSInputFile
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from supabase import create_client, Client
 from dotenv import load_dotenv
+import urllib.parse
 
 # --- НАСТРОЙКИ ТОПИКОВ (Замени цифры на ID из ссылок) ---
-TOPIC_LOGS_ALL = 0  # Общий топик для ВСЕХ логов/отзывов
+TOPIC_LOGS_ALL = 46  # Общий топик для ВСЕХ логов/отзывов
 
 TOPICS_BY_CATEGORY = {
     "support_bots": 38,    # Топик для Ботов поддержки
@@ -52,6 +53,10 @@ class ReviewState(StatesGroup):
 class AdminScoreState(StatesGroup):
     waiting_for_reason = State()
 
+class EditProjectState(StatesGroup):
+    waiting_for_description = State()
+    waiting_for_photo = State()
+
 # --- ПРОВЕРКА ПРАВ (ПО ЧАТУ) ---
 async def is_user_admin(user_id: int) -> bool:
     try:
@@ -76,15 +81,20 @@ def main_kb():
     buttons = [[KeyboardButton(text=v)] for v in CATEGORIES.values()]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-def project_card_kb(p_id):
+def project_card_kb(p_id, is_admin=False):
     """Чистая карточка проекта без кнопок"""
+    if is_admin:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔘 Открыть панель", callback_data=f"panel_{p_id}")],
+            [InlineKeyboardButton(text="⚙️ Управление проектом", callback_data=f"edit_{p_id}")]
+        ])
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔘 Открыть панель", callback_data=f"panel_{p_id}")]
     ])
 
-def project_panel_kb(p_id):
+def project_panel_kb(p_id, is_admin=False):
     """Полная панель действий"""
-    return InlineKeyboardMarkup(inline_keyboard=[
+    buttons = [
         [
             InlineKeyboardButton(text="⭐ Оценить", callback_data=f"rev_{p_id}"),
             InlineKeyboardButton(text="❤️ Поддержать", callback_data=f"like_{p_id}")
@@ -92,13 +102,28 @@ def project_panel_kb(p_id):
         [
             InlineKeyboardButton(text="💬 Отзывы", callback_data=f"viewrev_{p_id}"),
             InlineKeyboardButton(text="📊 История", callback_data=f"history_{p_id}")
-        ],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"back_{p_id}")]
-    ])
+        ]
+    ]
+    
+    if is_admin:
+        buttons.append([InlineKeyboardButton(text="⚙️ Управление проектом", callback_data=f"edit_{p_id}")])
+    
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"back_{p_id}")])
+    
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def back_to_panel_kb(p_id):
+def back_to_panel_kb(p_id, is_admin=False):
     """Кнопка назад к панели"""
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад к панели", callback_data=f"panel_{p_id}")]
+    ])
+
+def edit_project_kb(p_id):
+    """Клавиатура управления проектом"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📝 Изменить описание", callback_data=f"editdesc_{p_id}")],
+        [InlineKeyboardButton(text="🖼️ Изменить фото", callback_data=f"editphoto_{p_id}")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data=f"stats_{p_id}")],
         [InlineKeyboardButton(text="⬅️ Назад к панели", callback_data=f"panel_{p_id}")]
     ])
 
@@ -135,6 +160,51 @@ async def send_log_to_topics(admin_text: str, category: str = None):
             
     except Exception as e:
         logging.error(f"Ошибка отправки лога: {e}")
+
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+async def safe_edit_message(call: CallbackQuery, text: str, reply_markup=None, parse_mode="HTML"):
+    """Безопасное редактирование сообщения с проверкой на изменения"""
+    try:
+        current_text = call.message.text or call.message.caption or ""
+        current_text = current_text[:100]  # Берем только начало для сравнения
+        
+        # Сравниваем первые 50 символов
+        if current_text[:50] == text[:50] and call.message.reply_markup == reply_markup:
+            # Если сообщение не изменилось, просто отвечаем
+            await call.answer()
+            return
+        
+        await call.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception as e:
+        # Если ошибка редактирования, отправляем новое сообщение
+        try:
+            await call.message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        except Exception as e2:
+            logging.error(f"Ошибка отправки сообщения: {e2}")
+
+async def get_or_create_photo_url(project_id: int, photo_url: str = None) -> str:
+    """Получает или создает URL фотографии проекта"""
+    if photo_url and photo_url.startswith("http"):
+        return photo_url
+    
+    # Проверяем наличие фото в базе
+    result = supabase.table("project_photos").select("*").eq("project_id", project_id).execute()
+    
+    if result.data:
+        # Возвращаем первую фотографию
+        return result.data[0].get('photo_url', '')
+    
+    # Если фото нет, возвращаем дефолтное
+    return ""
+
+def escape_md(text: str) -> str:
+    """Экранирует специальные символы для Markdown"""
+    if not text:
+        return ""
+    escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in escape_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
 
 # --- АДМИН-КОМАНДЫ ---
 
@@ -281,6 +351,7 @@ async def admin_delete(message: Message, state: FSMContext):
         supabase.table("projects").delete().eq("id", project_id).execute()
         supabase.table("user_logs").delete().eq("project_id", project_id).execute()
         supabase.table("rating_history").delete().eq("project_id", project_id).execute()
+        supabase.table("project_photos").delete().eq("project_id", project_id).execute()
         
         # Отправляем лог
         log_text = (f"🗑 <b>Проект удален:</b>\n\n"
@@ -540,32 +611,69 @@ async def admin_delrev(message: Message, state: FSMContext):
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     top = supabase.table("projects").select("*").order("score", desc=True).limit(5).execute().data
-    text = "<b>🏆 ТОП-5 ПРОЕКТОВ КМБП</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+    
+    # Стартовое сообщение с фото
+    start_text = "<b>🌟 ДОБРО ПОЖАЛОВАТЬ В РЕЙТИНГ ПРОЕКТОВ КМБП!</b>\n\n"
+    start_text += "Здесь вы можете оценивать проекты, оставлять отзывы и следить за рейтингом лучших проектов сообщества.\n\n"
+    start_text += "🎯 <b>Как это работает:</b>\n"
+    start_text += "• Выберите категорию проекта\n"
+    start_text += "• Оцените проект или поставьте лайк\n"
+    start_text += "• Следите за изменениями рейтинга\n\n"
+    
     if top:
+        start_text += "<b>🏆 ТОП-5 ПРОЕКТОВ:</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
         for i, p in enumerate(top, 1):
-            text += f"{i}. <b>{p['name']}</b> — <code>{p['score']}</code>\n"
+            start_text += f"{i}. <b>{p['name']}</b> — <code>{p['score']}</code>\n"
     else: 
-        text += "Список пуст.\n"
+        start_text += "<b>🏆 ТОП-5 ПРОЕКТОВ:</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+        start_text += "Список пуст. Будьте первым, кто добавит проект!\n"
     
-    text += "\n📊 <i>Нажмите на категорию ниже, чтобы увидеть все проекты</i>"
+    start_text += "\n📊 <i>Нажмите на категорию ниже, чтобы увидеть все проекты</i>"
     
-    await message.answer(text, reply_markup=main_kb(), parse_mode="HTML")
+    try:
+        # Пробуем отправить с фото
+        photo = FSInputFile("start_photo.jpg")  # Убедись, что файл существует в папке с ботом
+        await message.answer_photo(
+            photo=photo,
+            caption=start_text,
+            reply_markup=main_kb(),
+            parse_mode="HTML"
+        )
+    except:
+        # Если фото нет, отправляем просто текст
+        await message.answer(start_text, reply_markup=main_kb(), parse_mode="HTML")
 
 @router.message(F.text.in_(CATEGORIES.values()))
 async def show_cat(message: Message):
     cat_key = [k for k, v in CATEGORIES.items() if v == message.text][0]
     data = supabase.table("projects").select("*").eq("category", cat_key).order("score", desc=True).execute().data
     if not data: 
-        await message.answer(f"В разделе '{message.text}' пусто.")
+        await message.answer(f"📭 В разделе <b>'{message.text}'</b> пока нет проектов.", parse_mode="HTML")
         return
     
+    is_admin = await is_user_admin(message.from_user.id)
+    
     for p in data:
+        # Получаем фото проекта
+        photo_url = await get_or_create_photo_url(p['id'])
+        
         # Чистая карточка проекта
         card = f"<b>{p['name']}</b>\n\n{p['description']}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
         card += f"📊 Текущий рейтинг: <b>{p['score']}</b>\n\n"
         card += f"<i>Нажмите кнопку ниже для управления проектом</i>"
         
-        await message.answer(card, reply_markup=project_card_kb(p['id']), parse_mode="HTML")
+        if photo_url:
+            try:
+                await message.answer_photo(
+                    photo=photo_url,
+                    caption=card,
+                    reply_markup=project_card_kb(p['id'], is_admin),
+                    parse_mode="HTML"
+                )
+            except:
+                await message.answer(card, reply_markup=project_card_kb(p['id'], is_admin), parse_mode="HTML")
+        else:
+            await message.answer(card, reply_markup=project_card_kb(p['id'], is_admin), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("panel_"))
 async def open_panel(call: CallbackQuery):
@@ -577,6 +685,8 @@ async def open_panel(call: CallbackQuery):
     if not project:
         await call.answer("Проект не найден.", show_alert=True)
         return
+    
+    is_admin = await is_user_admin(call.from_user.id)
     
     # Получаем последние изменения
     recent_changes = supabase.table("rating_history").select("*")\
@@ -600,7 +710,7 @@ async def open_panel(call: CallbackQuery):
     
     text += f"<i>Выберите действие:</i>"
     
-    await call.message.edit_text(text, reply_markup=project_panel_kb(p_id), parse_mode="HTML")
+    await safe_edit_message(call, text, reply_markup=project_panel_kb(p_id, is_admin))
     await call.answer()
 
 @router.callback_query(F.data.startswith("back_"))
@@ -608,6 +718,247 @@ async def back_to_panel(call: CallbackQuery):
     """Возврат к панели из других разделов"""
     p_id = call.data.split("_")[1]
     await open_panel(call)
+
+@router.callback_query(F.data.startswith("edit_"))
+async def edit_project_menu(call: CallbackQuery):
+    """Меню управления проектом (только для админов)"""
+    p_id = call.data.split("_")[1]
+    
+    # Проверка прав
+    if not await is_user_admin(call.from_user.id):
+        await call.answer("❌ Эта функция доступна только администраторам.", show_alert=True)
+        return
+    
+    project = supabase.table("projects").select("*").eq("id", p_id).single().execute().data
+    if not project:
+        await call.answer("Проект не найден.", show_alert=True)
+        return
+    
+    # Получаем статистику
+    reviews_count = supabase.table("user_logs")\
+        .select("*")\
+        .eq("project_id", p_id)\
+        .eq("action_type", "review")\
+        .execute()
+    
+    likes_count = supabase.table("user_logs")\
+        .select("*")\
+        .eq("project_id", p_id)\
+        .eq("action_type", "like")\
+        .execute()
+    
+    reviews_num = len(reviews_count.data) if reviews_count.data else 0
+    likes_num = len(likes_count.data) if likes_count.data else 0
+    
+    text = f"<b>⚙️ УПРАВЛЕНИЕ ПРОЕКТОМ</b>\n\n"
+    text += f"<b>{project['name']}</b>\n"
+    text += f"📂 Категория: <code>{project['category']}</code>\n"
+    text += f"📊 Рейтинг: <b>{project['score']}</b>\n"
+    text += f"💬 Отзывов: {reviews_num}\n"
+    text += f"❤️ Лайков: {likes_num}\n"
+    text += f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n"
+    text += f"<i>Выберите действие:</i>"
+    
+    await safe_edit_message(call, text, reply_markup=edit_project_kb(p_id))
+    await call.answer()
+
+@router.callback_query(F.data.startswith("editdesc_"))
+async def edit_description_start(call: CallbackQuery, state: FSMContext):
+    """Начало изменения описания"""
+    p_id = call.data.split("_")[1]
+    
+    # Проверка прав
+    if not await is_user_admin(call.from_user.id):
+        await call.answer("❌ Эта функция доступна только администраторам.", show_alert=True)
+        return
+    
+    project = supabase.table("projects").select("*").eq("id", p_id).single().execute().data
+    if not project:
+        await call.answer("Проект не найден.", show_alert=True)
+        return
+    
+    await state.update_data(project_id=p_id)
+    await state.set_state(EditProjectState.waiting_for_description)
+    
+    text = f"<b>📝 ИЗМЕНЕНИЕ ОПИСАНИЯ</b>\n\n"
+    text += f"<b>{project['name']}</b>\n"
+    text += f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+    text += f"<b>Текущее описание:</b>\n"
+    text += f"<i>{project['description']}</i>\n\n"
+    text += f"📝 <b>Введите новое описание:</b>"
+    
+    await safe_edit_message(call, text, reply_markup=back_to_panel_kb(p_id, True))
+    await call.answer()
+
+@router.message(EditProjectState.waiting_for_description)
+async def edit_description_save(message: Message, state: FSMContext):
+    """Сохранение нового описания"""
+    data = await state.get_data()
+    project_id = data['project_id']
+    new_description = message.text.strip()
+    
+    if not new_description:
+        await message.reply("❌ Описание не может быть пустым.")
+        return
+    
+    # Обновляем описание в базе
+    supabase.table("projects").update({"description": new_description}).eq("id", project_id).execute()
+    
+    # Получаем обновленный проект
+    project = supabase.table("projects").select("*").eq("id", project_id).single().execute().data
+    
+    # Отправляем лог
+    log_text = (f"📝 <b>Изменено описание проекта:</b>\n\n"
+               f"🏷 Проект: <b>{project['name']}</b>\n"
+               f"📂 Категория: <code>{project['category']}</code>\n"
+               f"📝 Новое описание: <i>{new_description[:200]}...</i>\n"
+               f"👤 Админ: @{message.from_user.username or message.from_user.id}")
+    
+    await send_log_to_topics(log_text, project['category'])
+    
+    await message.reply(
+        f"✅ Описание проекта <b>{project['name']}</b> успешно обновлено!",
+        parse_mode="HTML"
+    )
+    
+    await state.clear()
+
+@router.callback_query(F.data.startswith("editphoto_"))
+async def edit_photo_start(call: CallbackQuery, state: FSMContext):
+    """Начало изменения фото"""
+    p_id = call.data.split("_")[1]
+    
+    # Проверка прав
+    if not await is_user_admin(call.from_user.id):
+        await call.answer("❌ Эта функция доступна только администраторам.", show_alert=True)
+        return
+    
+    project = supabase.table("projects").select("*").eq("id", p_id).single().execute().data
+    if not project:
+        await call.answer("Проект не найден.", show_alert=True)
+        return
+    
+    await state.update_data(project_id=p_id)
+    await state.set_state(EditProjectState.waiting_for_photo)
+    
+    text = f"<b>🖼️ ИЗМЕНЕНИЕ ФОТОГРАФИИ</b>\n\n"
+    text += f"<b>{project['name']}</b>\n"
+    text += f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+    text += f"📸 <b>Отправьте новую фотографию для проекта:</b>\n\n"
+    text += f"<i>Рекомендуемый размер: квадратное фото 1:1</i>"
+    
+    await safe_edit_message(call, text, reply_markup=back_to_panel_kb(p_id, True))
+    await call.answer()
+
+@router.message(EditProjectState.waiting_for_photo, F.photo)
+async def edit_photo_save(message: Message, state: FSMContext):
+    """Сохранение новой фотографии"""
+    data = await state.get_data()
+    project_id = data['project_id']
+    
+    # Получаем самую большую версию фото
+    photo = message.photo[-1]
+    photo_id = photo.file_id
+    
+    # Сохраняем информацию о фото в базе
+    supabase.table("project_photos").upsert({
+        "project_id": project_id,
+        "photo_file_id": photo_id,
+        "updated_by": message.from_user.id,
+        "updated_at": "now()"
+    }).execute()
+    
+    # Получаем проект
+    project = supabase.table("projects").select("*").eq("id", project_id).single().execute().data
+    
+    # Отправляем лог
+    log_text = (f"🖼️ <b>Изменена фотография проекта:</b>\n\n"
+               f"🏷 Проект: <b>{project['name']}</b>\n"
+               f"📂 Категория: <code>{project['category']}</code>\n"
+               f"👤 Админ: @{message.from_user.username or message.from_user.id}")
+    
+    await send_log_to_topics(log_text, project['category'])
+    
+    await message.reply(
+        f"✅ Фотография проекта <b>{project['name']}</b> успешно обновлена!",
+        parse_mode="HTML"
+    )
+    
+    await state.clear()
+
+@router.message(EditProjectState.waiting_for_photo)
+async def edit_photo_wrong(message: Message):
+    """Обработка неправильного ввода при загрузке фото"""
+    await message.reply("❌ Пожалуйста, отправьте фотографию. Отправьте фото или нажмите /cancel для отмены.")
+
+@router.callback_query(F.data.startswith("stats_"))
+async def show_stats(call: CallbackQuery):
+    """Показать статистику проекта"""
+    p_id = call.data.split("_")[1]
+    
+    # Проверка прав
+    if not await is_user_admin(call.from_user.id):
+        await call.answer("❌ Эта функция доступна только администраторам.", show_alert=True)
+        return
+    
+    project = supabase.table("projects").select("*").eq("id", p_id).single().execute().data
+    if not project:
+        await call.answer("Проект не найден.", show_alert=True)
+        return
+    
+    # Получаем статистику
+    reviews_result = supabase.table("user_logs")\
+        .select("*")\
+        .eq("project_id", p_id)\
+        .eq("action_type", "review")\
+        .execute()
+    
+    likes_result = supabase.table("user_logs")\
+        .select("*")\
+        .eq("project_id", p_id)\
+        .eq("action_type", "like")\
+        .execute()
+    
+    history_result = supabase.table("rating_history")\
+        .select("*")\
+        .eq("project_id", p_id)\
+        .execute()
+    
+    reviews = reviews_result.data if reviews_result.data else []
+    likes = likes_result.data if likes_result.data else []
+    history = history_result.data if history_result.data else []
+    
+    # Считаем среднюю оценку
+    avg_rating = 0
+    if reviews:
+        total_rating = sum([r['rating_val'] for r in reviews])
+        avg_rating = total_rating / len(reviews)
+    
+    text = f"<b>📊 СТАТИСТИКА ПРОЕКТА</b>\n\n"
+    text += f"<b>{project['name']}</b>\n"
+    text += f"📂 Категория: <code>{project['category']}</code>\n"
+    text += f"🔢 Текущий рейтинг: <b>{project['score']}</b>\n"
+    text += f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+    text += f"📈 <b>Общая статистика:</b>\n"
+    text += f"• 💬 Отзывов: {len(reviews)}\n"
+    text += f"• ❤️ Лайков: {len(likes)}\n"
+    text += f"• ⭐ Средняя оценка: {avg_rating:.1f}/5\n"
+    text += f"• 📊 Всего изменений рейтинга: {len(history)}\n\n"
+    
+    if reviews:
+        # Распределение оценок
+        rating_dist = {1:0, 2:0, 3:0, 4:0, 5:0}
+        for r in reviews:
+            rating_dist[r['rating_val']] += 1
+        
+        text += f"📊 <b>Распределение оценок:</b>\n"
+        for rating in range(5, 0, -1):
+            count = rating_dist[rating]
+            percent = (count / len(reviews)) * 100 if reviews else 0
+            text += f"{'⭐' * rating}: {count} ({percent:.1f}%)\n"
+    
+    await safe_edit_message(call, text, reply_markup=edit_project_kb(p_id))
+    await call.answer()
 
 @router.callback_query(F.data.startswith("rev_"))
 async def rev_start(call: CallbackQuery, state: FSMContext):
@@ -619,11 +970,13 @@ async def rev_start(call: CallbackQuery, state: FSMContext):
     project = supabase.table("projects").select("name").eq("id", p_id).single().execute().data
     project_name = project['name'] if project else "Проект"
     
+    is_admin = await is_user_admin(call.from_user.id)
+    
     txt = f"📝 <b>Изменение отзыва для проекта {project_name}</b>\n\nВведите новый текст отзыва:"
     if not check.data:
         txt = f"💬 <b>Новый отзыв для проекта {project_name}</b>\n\nВведите текст отзыва:"
     
-    await call.message.edit_text(txt, parse_mode="HTML", reply_markup=back_to_panel_kb(p_id))
+    await safe_edit_message(call, txt, reply_markup=back_to_panel_kb(p_id, is_admin))
     await call.answer()
 
 @router.message(ReviewState.waiting_for_text)
@@ -684,12 +1037,14 @@ async def rev_end(call: CallbackQuery, state: FSMContext):
         "related_review_id": log_id
     }).execute()
     
-    await call.message.edit_text(
+    is_admin = await is_user_admin(call.from_user.id)
+    
+    await safe_edit_message(
+        call,
         f"✅ <b>Отзыв успешно {res_txt}!</b>\n\n"
         f"📊 Изменение рейтинга: <code>{rating_change:+d}</code>\n"
         f"🔢 Новый рейтинг: <b>{new_score}</b>",
-        parse_mode="HTML",
-        reply_markup=back_to_panel_kb(p_id)
+        reply_markup=back_to_panel_kb(p_id, is_admin)
     )
     
     # ФОРМИРУЕМ ЛОГ
@@ -715,10 +1070,12 @@ async def view_reviews(call: CallbackQuery):
     project = supabase.table("projects").select("name").eq("id", p_id).single().execute().data
     project_name = project['name'] if project else "Проект"
     
+    is_admin = await is_user_admin(call.from_user.id)
+    
     if not revs: 
         text = f"<b>💬 ОТЗЫВЫ ПРОЕКТА</b>\n<b>{project_name}</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n"
         text += "📭 Отзывов еще нет\n"
-        await call.message.edit_text(text, parse_mode="HTML", reply_markup=back_to_panel_kb(p_id))
+        await safe_edit_message(call, text, reply_markup=back_to_panel_kb(p_id, is_admin))
         await call.answer()
         return
     
@@ -728,7 +1085,7 @@ async def view_reviews(call: CallbackQuery):
         stars = '⭐' * r['rating_val']
         text += f"{stars}\n<i>{r['review_text']}</i>\n📅 {date}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
     
-    await call.message.edit_text(text, parse_mode="HTML", reply_markup=back_to_panel_kb(p_id))
+    await safe_edit_message(call, text, reply_markup=back_to_panel_kb(p_id, is_admin))
     await call.answer()
 
 @router.callback_query(F.data.startswith("history_"))
@@ -741,6 +1098,8 @@ async def view_history(call: CallbackQuery):
     if not project:
         await call.answer("Проект не найден.", show_alert=True)
         return
+    
+    is_admin = await is_user_admin(call.from_user.id)
     
     # Получаем историю изменений
     history = supabase.table("rating_history").select("*")\
@@ -769,7 +1128,7 @@ async def view_history(call: CallbackQuery):
             text += f"   {actor}\n"
             text += f"   📅 {date_time}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
     
-    await call.message.edit_text(text, parse_mode="HTML", reply_markup=back_to_panel_kb(p_id))
+    await safe_edit_message(call, text, reply_markup=back_to_panel_kb(p_id, is_admin))
     await call.answer()
 
 @router.callback_query(F.data.startswith("like_"))
@@ -813,28 +1172,7 @@ async def handle_like(call: CallbackQuery):
     }).execute()
     
     # Обновляем панель с новым рейтингом
-    recent_changes = supabase.table("rating_history").select("*")\
-        .eq("project_id", p_id)\
-        .order("created_at", desc=True)\
-        .limit(2)\
-        .execute().data
-    
-    text = f"<b>🔘 ПАНЕЛЬ УПРАВЛЕНИЯ</b>\n\n"
-    text += f"<b>{project['name']}</b>\n"
-    text += f"{project['description']}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-    text += f"📊 Текущий рейтинг: <b>{new_score}</b> (+1)\n\n"
-    
-    if recent_changes:
-        text += f"<b>📈 Последние изменения:</b>\n"
-        for change in recent_changes:
-            date = change['created_at'][:10] if change['created_at'] else ""
-            symbol = "📈" if change['change_amount'] > 0 else "📉" if change['change_amount'] < 0 else "➡️"
-            text += f"{symbol} <code>{change['change_amount']:+d}</code> — {change['reason'][:50]}... ({date})\n"
-        text += f"\n"
-    
-    text += f"<i>Выберите действие:</i>"
-    
-    await call.message.edit_text(text, reply_markup=project_panel_kb(p_id), parse_mode="HTML")
+    await open_panel(call)
     await call.answer("❤️ Голос учтен!")
 
 async def main():
