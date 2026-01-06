@@ -259,9 +259,34 @@ async def find_project_by_name(name: str):
         logging.error(f"Ошибка поиска проекта: {e}")
     return None
 
-async def show_projects_batch(category_key, offset, message_or_call, is_first_batch=False):
-    """Показывает партию проектов (по 5 штук)"""
-    projects_per_batch = 5
+# Если это первый батч и есть еще проекты, добавляем кнопку "Показать еще"
+if is_first_batch and has_next:
+    kb = pagination_kb(category_key, offset + projects_per_batch, has_next)
+    if isinstance(message_or_call, CallbackQuery):
+        await message_or_call.message.answer("⬇️ <b>Показано:</b> <code>{}-{}</code> из <code>{}</code> проектов".format(
+            offset + 1, min(offset + projects_per_batch, total_projects), total_projects
+        ), reply_markup=kb, parse_mode="HTML")
+    else:
+        await message_or_call.answer("⬇️ <b>Показано:</b> <code>{}-{}</code> из <code>{}</code> проектов".format(
+            offset + 1, min(offset + projects_per_batch, total_projects), total_projects
+        ), reply_markup=kb, parse_mode="HTML")
+elif isinstance(message_or_call, CallbackQuery) and not is_first_batch:
+    # Обновляем сообщение с пагинацией
+    new_offset = offset + projects_per_batch
+    new_has_next = new_offset < total_projects
+    
+    # Удаляем старое сообщение с пагинацией и создаем новое
+    try:
+        await message_or_call.message.delete()
+    except:
+        pass
+        
+    if new_has_next:
+        kb = pagination_kb(category_key, new_offset, new_has_next)
+        await message_or_call.message.answer("⬇️ <b>Показано:</b> <code>{}-{}</code> из <code>{}</code> проектов".format(
+            offset + projects_per_batch + 1, min(new_offset + projects_per_batch, total_projects), total_projects
+        ), reply_markup=kb, parse_mode="HTML")
+
     
     # Получаем проекты для категории
     data = supabase.table("projects")\
