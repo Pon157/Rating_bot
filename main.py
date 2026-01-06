@@ -152,7 +152,10 @@ def pagination_kb(category_key, offset, has_next=True):
     """Клавиатура пагинации для кнопки 'Показать еще'"""
     buttons = []
     if has_next:
-        buttons.append([InlineKeyboardButton(text="📜 Показать еще", callback_data=f"more_{category_key}_{offset}")])
+        # Формируем callback_data: more_{category_key}_{offset}
+        # Например: more_support_bots_5
+        callback_data = f"more_{category_key}_{offset}"
+        buttons.append([InlineKeyboardButton(text="📜 Показать еще", callback_data=callback_data)])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # --- ФУНКЦИЯ ОТПРАВКИ ЛОГОВ ---
