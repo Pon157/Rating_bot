@@ -259,34 +259,9 @@ async def find_project_by_name(name: str):
         logging.error(f"Ошибка поиска проекта: {e}")
     return None
 
-# Если это первый батч и есть еще проекты, добавляем кнопку "Показать еще"
-if is_first_batch and has_next:
-    kb = pagination_kb(category_key, offset + projects_per_batch, has_next)
-    if isinstance(message_or_call, CallbackQuery):
-        await message_or_call.message.answer("⬇️ <b>Показано:</b> <code>{}-{}</code> из <code>{}</code> проектов".format(
-            offset + 1, min(offset + projects_per_batch, total_projects), total_projects
-        ), reply_markup=kb, parse_mode="HTML")
-    else:
-        await message_or_call.answer("⬇️ <b>Показано:</b> <code>{}-{}</code> из <code>{}</code> проектов".format(
-            offset + 1, min(offset + projects_per_batch, total_projects), total_projects
-        ), reply_markup=kb, parse_mode="HTML")
-elif isinstance(message_or_call, CallbackQuery) and not is_first_batch:
-    # Обновляем сообщение с пагинацией
-    new_offset = offset + projects_per_batch
-    new_has_next = new_offset < total_projects
-    
-    # Удаляем старое сообщение с пагинацией и создаем новое
-    try:
-        await message_or_call.message.delete()
-    except:
-        pass
-        
-    if new_has_next:
-        kb = pagination_kb(category_key, new_offset, new_has_next)
-        await message_or_call.message.answer("⬇️ <b>Показано:</b> <code>{}-{}</code> из <code>{}</code> проектов".format(
-            offset + projects_per_batch + 1, min(new_offset + projects_per_batch, total_projects), total_projects
-        ), reply_markup=kb, parse_mode="HTML")
-
+async def show_projects_batch(category_key, offset, message_or_call, is_first_batch=False):
+    """Показывает партию проектов (по 5 штук)"""
+    projects_per_batch = 5
     
     # Получаем проекты для категории
     data = supabase.table("projects")\
@@ -321,9 +296,11 @@ elif isinstance(message_or_call, CallbackQuery) and not is_first_batch:
     if is_first_batch:
         text = f"<b>{CATEGORIES[category_key]}</b>\n"
         text += f"Всего проектов: {total_projects}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n"
-    else:
-        # Если не первый, продолжаем предыдущее сообщение
-        text = ""
+        
+        if isinstance(message_or_call, CallbackQuery):
+            await message_or_call.message.answer(text, parse_mode="HTML")
+        else:
+            await message_or_call.answer(text, parse_mode="HTML")
     
     for p in data:
         # Получаем фото проекта
@@ -393,6 +370,9 @@ elif isinstance(message_or_call, CallbackQuery) and not is_first_batch:
             await message_or_call.message.answer("⬇️ <b>Показано:</b> <code>{}-{}</code> из <code>{}</code> проектов".format(
                 offset + projects_per_batch + 1, min(new_offset + projects_per_batch, total_projects), total_projects
             ), reply_markup=kb, parse_mode="HTML")
+        else:
+            # Если проектов больше нет, отправляем финальное сообщение
+            await message_or_call.message.answer("✅ <b>Показаны все проекты</b>\nВсего проектов: <code>{}</code>".format(total_projects), parse_mode="HTML")
 
 # --- ОБРАБОТЧИК ПАГИНАЦИИ ---
 @router.callback_query(F.data.startswith("more_"))
@@ -426,7 +406,6 @@ async def handle_show_more(call: CallbackQuery):
     except Exception as e:
         logging.error(f"Ошибка пагинации: {e}")
         await call.answer("❌ Ошибка загрузки проектов", show_alert=True)
-    
 
 # --- ПОИСК ПРОЕКТОВ ---
 @router.message(F.text == "🔍 Поиск проекта")
