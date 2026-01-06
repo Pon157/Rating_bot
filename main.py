@@ -371,15 +371,34 @@ async def show_projects_batch(category_key, offset, message_or_call, is_first_ba
 async def handle_show_more(call: CallbackQuery):
     """Обработка кнопки 'Показать еще'"""
     try:
-        parts = call.data.split("_")
+        # Разбираем callback_data: more_{category_key}_{offset}
+        # Пример: more_support_bots_5
+        callback_data = call.data
+        parts = callback_data.split("_")
+        
+        # parts[0] = "more"
+        # parts[1] = category_key (может содержать "_")
+        # parts[2] = offset
+        
         if len(parts) >= 3:
-            category_key = parts[1]
-            offset = int(parts[2])
-            await show_projects_batch(category_key, offset, call, is_first_batch=False)
-            await call.answer()
+            # Категория может содержать "_" (например, "support_bots")
+            # Поэтому берем все части между "more" и последней частью (offset)
+            category_key = "_".join(parts[1:-1])
+            offset_str = parts[-1]
+            
+            try:
+                offset = int(offset_str)
+                await show_projects_batch(category_key, offset, call, is_first_batch=False)
+                await call.answer()
+            except ValueError:
+                await call.answer("❌ Ошибка: неверный формат данных", show_alert=True)
+        else:
+            await call.answer("❌ Ошибка: неверный формат callback данных", show_alert=True)
+            
     except Exception as e:
         logging.error(f"Ошибка пагинации: {e}")
-        await call.answer("Ошибка загрузки проектов", show_alert=True)
+        await call.answer("❌ Ошибка загрузки проектов", show_alert=True)
+    
 
 # --- ПОИСК ПРОЕКТОВ ---
 @router.message(F.text == "🔍 Поиск проекта")
