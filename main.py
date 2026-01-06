@@ -29,6 +29,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ADMIN_GROUP_ID = int(os.getenv("ADMIN_CHAT_ID", 0))
+BOT_USERNAME = os.getenv("BOT_USERNAME", "")  # Добавь в .env BOT_USERNAME=твойбот
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot = Bot(token=BOT_TOKEN)
@@ -115,9 +116,10 @@ def main_kb():
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 def project_card_kb(p_id):
-    """Чистая карточка проекта"""
+    """Чистая карточка проекта с кнопкой панели и ссылкой"""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔘 Открыть панель", callback_data=f"panel_{p_id}")]
+        [InlineKeyboardButton(text="🔘 Открыть панель", callback_data=f"panel_{p_id}")],
+        [InlineKeyboardButton(text="🔗 Поделиться проектом", url=f"https://t.me/{BOT_USERNAME}?start=project_{p_id}")]
     ])
 
 def project_panel_kb(p_id):
@@ -131,7 +133,10 @@ def project_panel_kb(p_id):
             InlineKeyboardButton(text="💬 Отзывы", callback_data=f"viewrev_{p_id}"),
             InlineKeyboardButton(text="📊 История", callback_data=f"history_{p_id}")
         ],
-        [InlineKeyboardButton(text="❌ Закрыть панель", callback_data="close_panel")]
+        [
+            InlineKeyboardButton(text="🔗 Поделиться", url=f"https://t.me/{BOT_USERNAME}?start=project_{p_id}"),
+            InlineKeyboardButton(text="❌ Закрыть", callback_data="close_panel")
+        ]
     ])
 
 def back_to_panel_kb(p_id):
@@ -139,6 +144,25 @@ def back_to_panel_kb(p_id):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад к панели", callback_data=f"panel_{p_id}")]
     ])
+
+def pagination_kb(category_key, page, total_pages, has_next=True):
+    """Клавиатура пагинации"""
+    buttons = []
+    
+    # Кнопки навигации
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cat_{category_key}_{page-1}"))
+    
+    nav_buttons.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=f"page_info"))
+    
+    if has_next:
+        nav_buttons.append(InlineKeyboardButton(text="Далее ➡️", callback_data=f"cat_{category_key}_{page+1}"))
+    
+    if nav_buttons:
+        buttons.append(nav_buttons)
+    
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # --- ФУНКЦИЯ ОТПРАВКИ ЛОГОВ ---
 async def send_log_to_topics(admin_text: str, category: str = None):
@@ -240,6 +264,80 @@ async def find_project_by_name(name: str):
     except Exception as e:
         logging.error(f"Ошибка поиска проекта: {e}")
     return None
+
+async def show_projects_page(category_key, page, message_or_call):
+    """Показывает страницу с проектами"""
+    projects_per_page = 5
+    offset = (page - 1) * projects_per_page
+    
+    # Получаем проекты для категории
+    data = supabase.table("projects")\
+        .select("*")\
+        .eq("category", category_key)\
+        .order("score", desc=True)\
+        .range(offset, offset + projects_per_page - 1)\
+        .execute().data
+    
+    # Считаем общее количество проектов
+    count_result = supabase.table("projects")\
+        .select("*", count="exact")\
+        .eq("category", category_key)\
+        .execute()
+    
+    total_projects = count_result.count if hasattr(count_result, 'count') else 0
+    total_pages = max(1, (total_projects + projects_per_page - 1) // projects_per_page)
+    
+    if not data: 
+        text = f"📭 В разделе <b>'{CATEGORIES[category_key]}'</b> пока нет проектов."
+        
+        if isinstance(message_or_call, CallbackQuery):
+            await safe_edit_message(message_or_call, text)
+        else:
+            await message_or_call.answer(text, parse_mode="HTML")
+        return
+    
+    # Заголовок страницы
+    text = f"<b>{CATEGORIES[category_key]}</b>\n"
+    text += f"Страница {page} из {total_pages}\n"
+    text += f"Всего проектов: {total_projects}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n"
+    
+    for i, p in enumerate(data, 1):
+        index = offset + i
+        text += f"<b>{index}. {p['name']}</b>\n"
+        text += f"📊 Рейтинг: <b>{p['score']}</b>\n"
+        text += f"{p['description'][:100]}{'...' if len(p['description']) > 100 else ''}\n"
+        text += f"🔗 <a href='https://t.me/{BOT_USERNAME}?start=project_{p['id']}'>Открыть проект</a>\n"
+        text += f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n"
+    
+    text += f"<i>Нажмите на ссылку проекта или используйте кнопки навигации ниже</i>"
+    
+    # Создаем клавиатуру пагинации
+    has_next = offset + projects_per_page < total_projects
+    kb = pagination_kb(category_key, page, total_pages, has_next)
+    
+    if isinstance(message_or_call, CallbackQuery):
+        await safe_edit_message(message_or_call, text, reply_markup=kb)
+    else:
+        await message_or_call.answer(text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True)
+
+# --- ОБРАБОТЧИК ПАГИНАЦИИ ---
+@router.callback_query(F.data.startswith("cat_"))
+async def handle_pagination(call: CallbackQuery):
+    """Обработка переключения страниц"""
+    try:
+        parts = call.data.split("_")
+        if len(parts) >= 3:
+            category_key = parts[1]
+            page = int(parts[2])
+            await show_projects_page(category_key, page, call)
+    except Exception as e:
+        logging.error(f"Ошибка пагинации: {e}")
+        await call.answer("Ошибка загрузки страницы", show_alert=True)
+
+@router.callback_query(F.data == "page_info")
+async def handle_page_info(call: CallbackQuery):
+    """Информация о странице"""
+    await call.answer("Текущая страница", show_alert=False)
 
 # --- КОМАНДЫ УПРАВЛЕНИЯ БАНОМ ---
 
@@ -402,25 +500,25 @@ async def admin_banlist(message: Message):
             .select("*")\
             .order("banned_at", desc=True)\
             .execute().data
-        
+    
         if not banned_users:
             await message.reply("📭 Список забаненных пользователей пуст.")
             return
-        
+    
         text = "<b>🚫 СПИСОК ЗАБАНЕННЫХ ПОЛЬЗОВАТЕЛЕЙ</b>\n\n"
-        
+    
         for i, ban in enumerate(banned_users, 1):
             # Форматируем дату
             banned_at = ban['banned_at'][:19] if ban['banned_at'] else "Неизвестно"
-            
+    
             text += f"<b>{i}. ID:</b> <code>{ban['user_id']}</code>\n"
             text += f"   <b>Причина:</b> <i>{ban['reason']}</i>\n"
             text += f"   <b>Забанен:</b> {banned_at}\n"
             text += f"   <b>Админ:</b> {ban['banned_by_username'] or ban['banned_by']}\n"
             text += f"   ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-        
+    
         text += f"\n📊 Всего забанено: <b>{len(banned_users)}</b> пользователей"
-        
+    
         # Разбиваем на части если слишком длинное
         if len(text) > 4000:
             parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
@@ -428,7 +526,7 @@ async def admin_banlist(message: Message):
                 await message.answer(part, parse_mode="HTML")
         else:
             await message.reply(text, parse_mode="HTML")
-        
+    
     except Exception as e:
         logging.error(f"Ошибка в /banlist: {e}")
         await message.reply(
@@ -608,13 +706,15 @@ async def admin_add(message: Message, state: FSMContext):
                        f"🏷 Название: <b>{name}</b>\n"
                        f"📂 Категория: <code>{cat}</code>\n"
                        f"📝 Описание: {desc}\n"
-                       f"👤 Админ: @{message.from_user.username or message.from_user.id}")
+                       f"👤 Админ: @{message.from_user.username or message.from_user.id}\n"
+                       f"🔗 Ссылка: https://t.me/{BOT_USERNAME}?start=project_{result.data[0]['id']}")
             
             await send_log_to_topics(log_text, cat)
             
             await message.reply(
                 f"✅ Проект <b>{name}</b> успешно добавлен!\n"
-                f"🆔 ID проекта: <code>{result.data[0]['id']}</code>",
+                f"🆔 ID проекта: <code>{result.data[0]['id']}</code>\n"
+                f"🔗 Ссылка: https://t.me/{BOT_USERNAME}?start=project_{result.data[0]['id']}",
                 parse_mode="HTML"
             )
         else:
@@ -1154,6 +1254,7 @@ async def admin_stats(message: Message):
         text += f"🆔 ID: <code>{project['id']}</code>\n"
         text += f"📂 Категория: <code>{project['category']}</code>\n"
         text += f"🔢 Текущий рейтинг: <b>{project['score']}</b>\n"
+        text += f"🔗 Ссылка: https://t.me/{BOT_USERNAME}?start=project_{project['id']}\n"
         text += f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
         text += f"📈 <b>Общая статистика:</b>\n"
         text += f"• 💬 Отзывов: {len(reviews)}\n"
@@ -1224,6 +1325,7 @@ async def admin_list_projects(message: Message):
             text += f"   📂 Категория: <code>{p['category']}</code>\n"
             text += f"   🔢 Рейтинг: <b>{p['score']}</b>\n"
             text += f"   💬 Отзывов: {reviews_num}\n"
+            text += f"   🔗 Ссылка: https://t.me/{BOT_USERNAME}?start=project_{p['id']}\n"
             text += f"   ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
         
         text += f"\n📊 Всего проектов: <b>{len(projects)}</b>"
@@ -1264,6 +1366,39 @@ async def cmd_start(message: Message, state: FSMContext):
         )
         return
     
+    # Проверяем, если ссылка на проект в стартовом сообщении
+    if len(message.text.split()) > 1:
+        param = message.text.split()[1]
+        if param.startswith("project_"):
+            try:
+                project_id = int(param.split("_")[1])
+                # Показываем карточку проекта
+                project = supabase.table("projects").select("*").eq("id", project_id).single().execute().data
+                
+                if project:
+                    # Получаем фото проекта
+                    photo_file_id = await get_project_photo(project_id)
+                    
+                    card = f"<b>{project['name']}</b>\n\n{project['description']}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+                    card += f"📊 Текущий рейтинг: <b>{project['score']}</b>\n\n"
+                    card += f"<i>Нажмите кнопку ниже для управления проектом</i>"
+                    
+                    if photo_file_id:
+                        try:
+                            await message.answer_photo(
+                                photo=photo_file_id,
+                                caption=card,
+                                reply_markup=project_card_kb(project_id),
+                                parse_mode="HTML"
+                            )
+                        except:
+                            await message.answer(card, reply_markup=project_card_kb(project_id), parse_mode="HTML")
+                    else:
+                        await message.answer(card, reply_markup=project_card_kb(project_id), parse_mode="HTML")
+                    return
+            except Exception as e:
+                logging.error(f"Ошибка открытия проекта по ссылке: {e}")
+    
     # Получаем топ проектов
     top_projects = supabase.table("projects").select("*").order("score", desc=True).limit(5).execute().data
     
@@ -1280,6 +1415,7 @@ async def cmd_start(message: Message, state: FSMContext):
         start_text += "<b>🏆 ТОП-5 ПРОЕКТОВ:</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
         for i, p in enumerate(top_projects, 1):
             start_text += f"{i}. <b>{p['name']}</b> — <code>{p['score']}</code>\n"
+            start_text += f"   🔗 https://t.me/{BOT_USERNAME}?start=project_{p['id']}\n"
     else: 
         start_text += "<b>🏆 ТОП-5 ПРОЕКТОВ:</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
         start_text += "Список пуст. Будьте первым, кто добавит проект!\n"
@@ -1301,33 +1437,9 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @router.message(F.text.in_(CATEGORIES.values()))
 async def show_cat(message: Message):
+    """Показать первую страницу категории"""
     cat_key = [k for k, v in CATEGORIES.items() if v == message.text][0]
-    data = supabase.table("projects").select("*").eq("category", cat_key).order("score", desc=True).execute().data
-    if not data: 
-        await message.answer(f"📭 В разделе <b>'{message.text}'</b> пока нет проектов.", parse_mode="HTML")
-        return
-    
-    for p in data:
-        # Получаем фото проекта
-        photo_file_id = await get_project_photo(p['id'])
-        
-        # Чистая карточка проекта
-        card = f"<b>{p['name']}</b>\n\n{p['description']}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-        card += f"📊 Текущий рейтинг: <b>{p['score']}</b>\n\n"
-        card += f"<i>Нажмите кнопку ниже для управления проектом</i>"
-        
-        if photo_file_id:
-            try:
-                await message.answer_photo(
-                    photo=photo_file_id,
-                    caption=card,
-                    reply_markup=project_card_kb(p['id']),
-                    parse_mode="HTML"
-                )
-            except:
-                await message.answer(card, reply_markup=project_card_kb(p['id']), parse_mode="HTML")
-        else:
-            await message.answer(card, reply_markup=project_card_kb(p['id']), parse_mode="HTML")
+    await show_projects_page(cat_key, 1, message)
 
 @router.callback_query(F.data.startswith("panel_"))
 async def open_panel(call: CallbackQuery):
@@ -1353,7 +1465,8 @@ async def open_panel(call: CallbackQuery):
     text = f"<b>🔘 ПАНЕЛЬ УПРАВЛЕНИЯ</b>\n\n"
     text += f"<b>{project['name']}</b>\n"
     text += f"{project['description']}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-    text += f"📊 Текущий рейтинг: <b>{project['score']}</b>\n\n"
+    text += f"📊 Текущий рейтинг: <b>{project['score']}</b>\n"
+    text += f"🔗 Поделиться: https://t.me/{BOT_USERNAME}?start=project_{p_id}\n\n"
     
     if recent_changes:
         text += f"<b>📈 Последние изменения:</b>\n"
