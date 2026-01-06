@@ -29,7 +29,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ADMIN_GROUP_ID = int(os.getenv("ADMIN_CHAT_ID", 0))
-BOT_USERNAME = os.getenv("BOT_USERNAME", "")  # Добавь в .env BOT_USERNAME=твойбот
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot = Bot(token=BOT_TOKEN)
@@ -56,6 +55,9 @@ class AdminScoreState(StatesGroup):
 class EditProjectState(StatesGroup):
     waiting_for_description = State()
     waiting_for_photo = State()
+
+class SearchState(StatesGroup):
+    waiting_for_query = State()
 
 # --- ПРОВЕРКА ПРАВ (ПО ЧАТУ) ---
 async def is_user_admin(user_id: int) -> bool:
@@ -112,14 +114,18 @@ class AccessMiddleware(BaseMiddleware):
 
 # --- КЛАВИАТУРЫ ---
 def main_kb():
-    buttons = [[KeyboardButton(text=v)] for v in CATEGORIES.values()]
+    """Основная клавиатура с категориями и поиском"""
+    buttons = [
+        [KeyboardButton(text=v) for v in list(CATEGORIES.values())[:2]],
+        [KeyboardButton(text=v) for v in list(CATEGORIES.values())[2:4]],
+        [KeyboardButton(text="🔍 Поиск проекта")]
+    ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 def project_card_kb(p_id):
-    """Чистая карточка проекта с кнопкой панели и ссылкой"""
+    """Чистая карточка проекта"""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔘 Открыть панель", callback_data=f"panel_{p_id}")],
-        [InlineKeyboardButton(text="🔗 Поделиться проектом", url=f"https://t.me/{BOT_USERNAME}?start=project_{p_id}")]
+        [InlineKeyboardButton(text="🔘 Открыть панель", callback_data=f"panel_{p_id}")]
     ])
 
 def project_panel_kb(p_id):
@@ -133,10 +139,7 @@ def project_panel_kb(p_id):
             InlineKeyboardButton(text="💬 Отзывы", callback_data=f"viewrev_{p_id}"),
             InlineKeyboardButton(text="📊 История", callback_data=f"history_{p_id}")
         ],
-        [
-            InlineKeyboardButton(text="🔗 Поделиться", url=f"https://t.me/{BOT_USERNAME}?start=project_{p_id}"),
-            InlineKeyboardButton(text="❌ Закрыть", callback_data="close_panel")
-        ]
+        [InlineKeyboardButton(text="❌ Закрыть панель", callback_data="close_panel")]
     ])
 
 def back_to_panel_kb(p_id):
@@ -145,23 +148,11 @@ def back_to_panel_kb(p_id):
         [InlineKeyboardButton(text="⬅️ Назад к панели", callback_data=f"panel_{p_id}")]
     ])
 
-def pagination_kb(category_key, page, total_pages, has_next=True):
-    """Клавиатура пагинации"""
+def pagination_kb(category_key, offset, has_next=True):
+    """Клавиатура пагинации для кнопки 'Показать еще'"""
     buttons = []
-    
-    # Кнопки навигации
-    nav_buttons = []
-    if page > 1:
-        nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cat_{category_key}_{page-1}"))
-    
-    nav_buttons.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=f"page_info"))
-    
     if has_next:
-        nav_buttons.append(InlineKeyboardButton(text="Далее ➡️", callback_data=f"cat_{category_key}_{page+1}"))
-    
-    if nav_buttons:
-        buttons.append(nav_buttons)
-    
+        buttons.append([InlineKeyboardButton(text="📜 Показать еще", callback_data=f"more_{category_key}_{offset}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # --- ФУНКЦИЯ ОТПРАВКИ ЛОГОВ ---
@@ -265,17 +256,16 @@ async def find_project_by_name(name: str):
         logging.error(f"Ошибка поиска проекта: {e}")
     return None
 
-async def show_projects_page(category_key, page, message_or_call):
-    """Показывает страницу с проектами"""
-    projects_per_page = 5
-    offset = (page - 1) * projects_per_page
+async def show_projects_batch(category_key, offset, message_or_call, is_first_batch=False):
+    """Показывает партию проектов (по 5 штук)"""
+    projects_per_batch = 5
     
     # Получаем проекты для категории
     data = supabase.table("projects")\
         .select("*")\
         .eq("category", category_key)\
         .order("score", desc=True)\
-        .range(offset, offset + projects_per_page - 1)\
+        .range(offset, offset + projects_per_batch - 1)\
         .execute().data
     
     # Считаем общее количество проектов
@@ -285,59 +275,192 @@ async def show_projects_page(category_key, page, message_or_call):
         .execute()
     
     total_projects = count_result.count if hasattr(count_result, 'count') else 0
-    total_pages = max(1, (total_projects + projects_per_page - 1) // projects_per_page)
     
     if not data: 
-        text = f"📭 В разделе <b>'{CATEGORIES[category_key]}'</b> пока нет проектов."
-        
-        if isinstance(message_or_call, CallbackQuery):
-            await safe_edit_message(message_or_call, text)
+        if is_first_batch:
+            text = f"📭 В разделе <b>'{CATEGORIES[category_key]}'</b> пока нет проектов."
+            
+            if isinstance(message_or_call, CallbackQuery):
+                await safe_edit_message(message_or_call, text)
+            else:
+                await message_or_call.answer(text, parse_mode="HTML")
         else:
-            await message_or_call.answer(text, parse_mode="HTML")
+            if isinstance(message_or_call, CallbackQuery):
+                await message_or_call.answer("Больше проектов нет", show_alert=True)
         return
     
-    # Заголовок страницы
-    text = f"<b>{CATEGORIES[category_key]}</b>\n"
-    text += f"Страница {page} из {total_pages}\n"
-    text += f"Всего проектов: {total_projects}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n"
-    
-    for i, p in enumerate(data, 1):
-        index = offset + i
-        text += f"<b>{index}. {p['name']}</b>\n"
-        text += f"📊 Рейтинг: <b>{p['score']}</b>\n"
-        text += f"{p['description'][:100]}{'...' if len(p['description']) > 100 else ''}\n"
-        text += f"🔗 <a href='https://t.me/{BOT_USERNAME}?start=project_{p['id']}'>Открыть проект</a>\n"
-        text += f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n"
-    
-    text += f"<i>Нажмите на ссылку проекта или используйте кнопки навигации ниже</i>"
-    
-    # Создаем клавиатуру пагинации
-    has_next = offset + projects_per_page < total_projects
-    kb = pagination_kb(category_key, page, total_pages, has_next)
-    
-    if isinstance(message_or_call, CallbackQuery):
-        await safe_edit_message(message_or_call, text, reply_markup=kb)
+    # Если это первый батч, отправляем новое сообщение
+    if is_first_batch:
+        text = f"<b>{CATEGORIES[category_key]}</b>\n"
+        text += f"Всего проектов: {total_projects}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n"
     else:
-        await message_or_call.answer(text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True)
+        # Если не первый, продолжаем предыдущее сообщение
+        text = ""
+    
+    for p in data:
+        # Получаем фото проекта
+        photo_file_id = await get_project_photo(p['id'])
+        
+        # Красивая карточка проекта как было раньше
+        card = f"<b>{p['name']}</b>\n\n{p['description']}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+        card += f"📊 Текущий рейтинг: <b>{p['score']}</b>\n\n"
+        card += f"<i>Нажмите кнопку ниже для управления проектом</i>"
+        
+        if isinstance(message_or_call, CallbackQuery):
+            # Для CallbackQuery отправляем новое сообщение
+            if photo_file_id:
+                try:
+                    await message_or_call.message.answer_photo(
+                        photo=photo_file_id,
+                        caption=card,
+                        reply_markup=project_card_kb(p['id']),
+                        parse_mode="HTML"
+                    )
+                except:
+                    await message_or_call.message.answer(card, reply_markup=project_card_kb(p['id']), parse_mode="HTML")
+            else:
+                await message_or_call.message.answer(card, reply_markup=project_card_kb(p['id']), parse_mode="HTML")
+        else:
+            # Для Message отправляем новое сообщение
+            if photo_file_id:
+                try:
+                    await message_or_call.answer_photo(
+                        photo=photo_file_id,
+                        caption=card,
+                        reply_markup=project_card_kb(p['id']),
+                        parse_mode="HTML"
+                    )
+                except:
+                    await message_or_call.answer(card, reply_markup=project_card_kb(p['id']), parse_mode="HTML")
+            else:
+                await message_or_call.answer(card, reply_markup=project_card_kb(p['id']), parse_mode="HTML")
+    
+    # Проверяем, есть ли еще проекты
+    has_next = offset + projects_per_batch < total_projects
+    
+    # Если это первый батч и есть еще проекты, добавляем кнопку "Показать еще"
+    if is_first_batch and has_next:
+        kb = pagination_kb(category_key, offset + projects_per_batch, has_next)
+        if isinstance(message_or_call, CallbackQuery):
+            await message_or_call.message.answer("⬇️ <b>Показано:</b> <code>{}-{}</code> из <code>{}</code> проектов".format(
+                offset + 1, min(offset + projects_per_batch, total_projects), total_projects
+            ), reply_markup=kb, parse_mode="HTML")
+        else:
+            await message_or_call.answer("⬇️ <b>Показано:</b> <code>{}-{}</code> из <code>{}</code> проектов".format(
+                offset + 1, min(offset + projects_per_batch, total_projects), total_projects
+            ), reply_markup=kb, parse_mode="HTML")
+    elif isinstance(message_or_call, CallbackQuery) and not is_first_batch:
+        # Обновляем сообщение с пагинацией
+        new_offset = offset + projects_per_batch
+        new_has_next = new_offset < total_projects
+        
+        # Удаляем старое сообщение с пагинацией и создаем новое
+        try:
+            await message_or_call.message.delete()
+        except:
+            pass
+            
+        if new_has_next:
+            kb = pagination_kb(category_key, new_offset, new_has_next)
+            await message_or_call.message.answer("⬇️ <b>Показано:</b> <code>{}-{}</code> из <code>{}</code> проектов".format(
+                offset + projects_per_batch + 1, min(new_offset + projects_per_batch, total_projects), total_projects
+            ), reply_markup=kb, parse_mode="HTML")
 
 # --- ОБРАБОТЧИК ПАГИНАЦИИ ---
-@router.callback_query(F.data.startswith("cat_"))
-async def handle_pagination(call: CallbackQuery):
-    """Обработка переключения страниц"""
+@router.callback_query(F.data.startswith("more_"))
+async def handle_show_more(call: CallbackQuery):
+    """Обработка кнопки 'Показать еще'"""
     try:
         parts = call.data.split("_")
         if len(parts) >= 3:
             category_key = parts[1]
-            page = int(parts[2])
-            await show_projects_page(category_key, page, call)
+            offset = int(parts[2])
+            await show_projects_batch(category_key, offset, call, is_first_batch=False)
+            await call.answer()
     except Exception as e:
         logging.error(f"Ошибка пагинации: {e}")
-        await call.answer("Ошибка загрузки страницы", show_alert=True)
+        await call.answer("Ошибка загрузки проектов", show_alert=True)
 
-@router.callback_query(F.data == "page_info")
-async def handle_page_info(call: CallbackQuery):
-    """Информация о странице"""
-    await call.answer("Текущая страница", show_alert=False)
+# --- ПОИСК ПРОЕКТОВ ---
+@router.message(F.text == "🔍 Поиск проекта")
+async def search_project_start(message: Message, state: FSMContext):
+    """Начать поиск проекта"""
+    await state.set_state(SearchState.waiting_for_query)
+    await message.answer(
+        "🔍 <b>Поиск проекта</b>\n\n"
+        "Введите название проекта или его часть для поиска:",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="⬅️ Назад в меню")]],
+            resize_keyboard=True
+        )
+    )
+
+@router.message(SearchState.waiting_for_query, F.text)
+async def search_project_execute(message: Message, state: FSMContext):
+    """Выполнить поиск проекта"""
+    if message.text == "⬅️ Назад в меню":
+        await state.clear()
+        await message.answer("Главное меню:", reply_markup=main_kb())
+        return
+    
+    search_query = message.text.strip()
+    
+    if len(search_query) < 2:
+        await message.answer(
+            "❌ Слишком короткий запрос. Введите минимум 2 символа."
+        )
+        return
+    
+    try:
+        # Ищем проекты по названию
+        results = supabase.table("projects")\
+            .select("*")\
+            .ilike("name", f"%{search_query}%")\
+            .order("score", desc=True)\
+            .limit(10)\
+            .execute().data
+        
+        if not results:
+            await message.answer(
+                f"🔍 По запросу <b>'{search_query}'</b> ничего не найдено.",
+                parse_mode="HTML"
+            )
+            return
+        
+        text = f"🔍 <b>Результаты поиска:</b> '{search_query}'\n"
+        text += f"Найдено проектов: {len(results)}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n"
+        
+        # Показываем первые 5 результатов
+        for i, p in enumerate(results[:5], 1):
+            text += f"<b>{i}. {p['name']}</b>\n"
+            text += f"📂 Категория: {CATEGORIES.get(p['category'], p['category'])}\n"
+            text += f"📊 Рейтинг: <b>{p['score']}</b>\n"
+            text += f"{p['description'][:80]}...\n"
+            text += f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n"
+        
+        # Создаем инлайн-клавиатуру с результатами
+        keyboard = []
+        for p in results[:5]:
+            keyboard.append([InlineKeyboardButton(
+                text=f"{p['name']} ({p['score']})",
+                callback_data=f"panel_{p['id']}"
+            )])
+        
+        if len(results) > 5:
+            text += f"<i>Показаны первые 5 из {len(results)} результатов</i>"
+        
+        await message.answer(
+            text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None,
+            parse_mode="HTML"
+        )
+        
+    except Exception as e:
+        logging.error(f"Ошибка поиска: {e}")
+        await message.answer(
+            "❌ Ошибка при выполнении поиска. Попробуйте позже."
+        )
 
 # --- КОМАНДЫ УПРАВЛЕНИЯ БАНОМ ---
 
@@ -706,15 +829,13 @@ async def admin_add(message: Message, state: FSMContext):
                        f"🏷 Название: <b>{name}</b>\n"
                        f"📂 Категория: <code>{cat}</code>\n"
                        f"📝 Описание: {desc}\n"
-                       f"👤 Админ: @{message.from_user.username or message.from_user.id}\n"
-                       f"🔗 Ссылка: https://t.me/{BOT_USERNAME}?start=project_{result.data[0]['id']}")
+                       f"👤 Админ: @{message.from_user.username or message.from_user.id}")
             
             await send_log_to_topics(log_text, cat)
             
             await message.reply(
                 f"✅ Проект <b>{name}</b> успешно добавлен!\n"
-                f"🆔 ID проекта: <code>{result.data[0]['id']}</code>\n"
-                f"🔗 Ссылка: https://t.me/{BOT_USERNAME}?start=project_{result.data[0]['id']}",
+                f"🆔 ID проекта: <code>{result.data[0]['id']}</code>",
                 parse_mode="HTML"
             )
         else:
@@ -1254,7 +1375,6 @@ async def admin_stats(message: Message):
         text += f"🆔 ID: <code>{project['id']}</code>\n"
         text += f"📂 Категория: <code>{project['category']}</code>\n"
         text += f"🔢 Текущий рейтинг: <b>{project['score']}</b>\n"
-        text += f"🔗 Ссылка: https://t.me/{BOT_USERNAME}?start=project_{project['id']}\n"
         text += f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
         text += f"📈 <b>Общая статистика:</b>\n"
         text += f"• 💬 Отзывов: {len(reviews)}\n"
@@ -1325,7 +1445,6 @@ async def admin_list_projects(message: Message):
             text += f"   📂 Категория: <code>{p['category']}</code>\n"
             text += f"   🔢 Рейтинг: <b>{p['score']}</b>\n"
             text += f"   💬 Отзывов: {reviews_num}\n"
-            text += f"   🔗 Ссылка: https://t.me/{BOT_USERNAME}?start=project_{p['id']}\n"
             text += f"   ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
         
         text += f"\n📊 Всего проектов: <b>{len(projects)}</b>"
@@ -1366,39 +1485,6 @@ async def cmd_start(message: Message, state: FSMContext):
         )
         return
     
-    # Проверяем, если ссылка на проект в стартовом сообщении
-    if len(message.text.split()) > 1:
-        param = message.text.split()[1]
-        if param.startswith("project_"):
-            try:
-                project_id = int(param.split("_")[1])
-                # Показываем карточку проекта
-                project = supabase.table("projects").select("*").eq("id", project_id).single().execute().data
-                
-                if project:
-                    # Получаем фото проекта
-                    photo_file_id = await get_project_photo(project_id)
-                    
-                    card = f"<b>{project['name']}</b>\n\n{project['description']}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-                    card += f"📊 Текущий рейтинг: <b>{project['score']}</b>\n\n"
-                    card += f"<i>Нажмите кнопку ниже для управления проектом</i>"
-                    
-                    if photo_file_id:
-                        try:
-                            await message.answer_photo(
-                                photo=photo_file_id,
-                                caption=card,
-                                reply_markup=project_card_kb(project_id),
-                                parse_mode="HTML"
-                            )
-                        except:
-                            await message.answer(card, reply_markup=project_card_kb(project_id), parse_mode="HTML")
-                    else:
-                        await message.answer(card, reply_markup=project_card_kb(project_id), parse_mode="HTML")
-                    return
-            except Exception as e:
-                logging.error(f"Ошибка открытия проекта по ссылке: {e}")
-    
     # Получаем топ проектов
     top_projects = supabase.table("projects").select("*").order("score", desc=True).limit(5).execute().data
     
@@ -1415,7 +1501,6 @@ async def cmd_start(message: Message, state: FSMContext):
         start_text += "<b>🏆 ТОП-5 ПРОЕКТОВ:</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
         for i, p in enumerate(top_projects, 1):
             start_text += f"{i}. <b>{p['name']}</b> — <code>{p['score']}</code>\n"
-            start_text += f"   🔗 https://t.me/{BOT_USERNAME}?start=project_{p['id']}\n"
     else: 
         start_text += "<b>🏆 ТОП-5 ПРОЕКТОВ:</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
         start_text += "Список пуст. Будьте первым, кто добавит проект!\n"
@@ -1437,9 +1522,9 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @router.message(F.text.in_(CATEGORIES.values()))
 async def show_cat(message: Message):
-    """Показать первую страницу категории"""
+    """Показать первую партию проектов категории"""
     cat_key = [k for k, v in CATEGORIES.items() if v == message.text][0]
-    await show_projects_page(cat_key, 1, message)
+    await show_projects_batch(cat_key, 0, message, is_first_batch=True)
 
 @router.callback_query(F.data.startswith("panel_"))
 async def open_panel(call: CallbackQuery):
@@ -1465,8 +1550,7 @@ async def open_panel(call: CallbackQuery):
     text = f"<b>🔘 ПАНЕЛЬ УПРАВЛЕНИЯ</b>\n\n"
     text += f"<b>{project['name']}</b>\n"
     text += f"{project['description']}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-    text += f"📊 Текущий рейтинг: <b>{project['score']}</b>\n"
-    text += f"🔗 Поделиться: https://t.me/{BOT_USERNAME}?start=project_{p_id}\n\n"
+    text += f"📊 Текущий рейтинг: <b>{project['score']}</b>\n\n"
     
     if recent_changes:
         text += f"<b>📈 Последние изменения:</b>\n"
