@@ -117,8 +117,7 @@ def main_kb():
     """Основная клавиатура с категориями и поиском"""
     buttons = [
         [KeyboardButton(text=v) for v in list(CATEGORIES.values())[:2]],
-        [KeyboardButton(text=v) for v in list(CATEGORIES.values())[2:4]],
-        [KeyboardButton(text=v) for v in list(CATEGORIES.values())[:5]],
+        [KeyboardButton(text=v) for v in list(CATEGORIES.values())[2:5]],
         [KeyboardButton(text="🔍 Поиск проекта")]
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
