@@ -9,6 +9,7 @@ from aiogram.types import (
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -32,7 +33,8 @@ ADMIN_GROUP_ID = int(os.getenv("ADMIN_CHAT_ID", 0))
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 router = Router()
 
 CATEGORIES = {
@@ -122,15 +124,29 @@ def main_kb():
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
+def cancel_kb():
+    """Клавиатура для отмены действия"""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="❌ Отмена")]],
+        resize_keyboard=True
+    )
+
+def back_to_menu_kb():
+    """Клавиатура для возврата в меню"""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="⬅️ Назад в меню")]],
+        resize_keyboard=True
+    )
+
 def project_card_kb(p_id):
     """Чистая карточка проекта"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔘 Открыть панель", callback_data=f"panel_{p_id}")]
     ])
 
-def project_panel_kb(p_id):
+def project_panel_kb(p_id, is_admin=False):
     """Полная панель действий"""
-    return InlineKeyboardMarkup(inline_keyboard=[
+    buttons = [
         [
             InlineKeyboardButton(text="⭐ Оценить", callback_data=f"rev_{p_id}"),
             InlineKeyboardButton(text="❤️ Поддержать", callback_data=f"like_{p_id}")
@@ -138,8 +154,31 @@ def project_panel_kb(p_id):
         [
             InlineKeyboardButton(text="💬 Отзывы", callback_data=f"viewrev_{p_id}"),
             InlineKeyboardButton(text="📊 История", callback_data=f"history_{p_id}")
+        ]
+    ]
+    
+    if is_admin:
+        buttons.append([
+            InlineKeyboardButton(text="✏️ Изменить", callback_data=f"edit_{p_id}"),
+            InlineKeyboardButton(text="🖼 Фото", callback_data=f"photo_{p_id}")
+        ])
+    
+    buttons.append([InlineKeyboardButton(text="❌ Закрыть панель", callback_data="close_panel")])
+    
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def admin_panel_kb(p_id):
+    """Админская панель управления проектом"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✏️ Изменить описание", callback_data=f"editdesc_{p_id}"),
+            InlineKeyboardButton(text="🖼 Добавить фото", callback_data=f"addphoto_{p_id}")
         ],
-        [InlineKeyboardButton(text="❌ Закрыть панель", callback_data="close_panel")]
+        [
+            InlineKeyboardButton(text="📈 Изменить рейтинг", callback_data=f"changescore_{p_id}"),
+            InlineKeyboardButton(text="🗑 Удалить проект", callback_data=f"deleteproj_{p_id}")
+        ],
+        [InlineKeyboardButton(text="⬅️ Назад к проекту", callback_data=f"panel_{p_id}")]
     ])
 
 def back_to_panel_kb(p_id):
@@ -147,6 +186,20 @@ def back_to_panel_kb(p_id):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад к панели", callback_data=f"panel_{p_id}")]
     ])
+
+def back_to_admin_panel_kb(p_id):
+    """Кнопка назад к админской панели"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад к управлению", callback_data=f"adminpanel_{p_id}")]
+    ])
+
+def rating_kb():
+    """Клавиатура для выбора оценки"""
+    buttons = [
+        [InlineKeyboardButton(text="⭐" * i, callback_data=f"st_{i}")] for i in range(5, 0, -1)
+    ]
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_text")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def pagination_kb(category_key, offset, has_next=True):
     """Клавиатура пагинации для кнопки 'Показать еще'"""
@@ -259,6 +312,16 @@ async def find_project_by_name(name: str):
         logging.error(f"Ошибка поиска проекта: {e}")
     return None
 
+async def find_project_by_id(project_id: int):
+    """Находит проект по ID"""
+    try:
+        result = supabase.table("projects").select("*").eq("id", project_id).execute()
+        if result.data:
+            return result.data[0]
+    except Exception as e:
+        logging.error(f"Ошибка поиска проекта по ID: {e}")
+    return None
+
 async def show_projects_batch(category_key, offset, message_or_call, is_first_batch=False):
     """Показывает партию проектов (по 5 штук)"""
     projects_per_batch = 5
@@ -307,7 +370,7 @@ async def show_projects_batch(category_key, offset, message_or_call, is_first_ba
         photo_file_id = await get_project_photo(p['id'])
         
         # Красивая карточка проекта как было раньше
-        card = f"<b>{p['name']}</b>\n\n{p['description']}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+        card = f"<b>{p['name']}</b>\n\n{p['description'][:150]}{'...' if len(p['description']) > 150 else ''}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
         card += f"📊 Текущий рейтинг: <b>{p['score']}</b>\n\n"
         card += f"<i>Нажмите кнопку ниже для управления проектом</i>"
         
@@ -407,6 +470,23 @@ async def handle_show_more(call: CallbackQuery):
         logging.error(f"Ошибка пагинации: {e}")
         await call.answer("❌ Ошибка загрузки проектов", show_alert=True)
 
+# --- ОБРАБОТЧИК КНОПКИ НАЗАД В МЕНЮ ---
+@router.message(F.text == "⬅️ Назад в меню")
+async def back_to_menu(message: Message, state: FSMContext):
+    """Железобетонный обработчик кнопки 'Назад в меню'"""
+    await state.clear()
+    await message.answer("Главное меню:", reply_markup=main_kb())
+
+@router.message(F.text == "❌ Отмена")
+async def cancel_action(message: Message, state: FSMContext):
+    """Отмена текущего действия"""
+    current_state = await state.get_state()
+    if current_state:
+        await state.clear()
+        await message.answer("❌ Действие отменено.", reply_markup=main_kb())
+    else:
+        await message.answer("Главное меню:", reply_markup=main_kb())
+
 # --- ПОИСК ПРОЕКТОВ ---
 @router.message(F.text == "🔍 Поиск проекта")
 async def search_project_start(message: Message, state: FSMContext):
@@ -416,10 +496,7 @@ async def search_project_start(message: Message, state: FSMContext):
         "🔍 <b>Поиск проекта</b>\n\n"
         "Введите название проекта или его часть для поиска:",
         parse_mode="HTML",
-        reply_markup=ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="⬅️ Назад в меню")]],
-            resize_keyboard=True
-        )
+        reply_markup=back_to_menu_kb()
     )
 
 @router.message(SearchState.waiting_for_query, F.text)
@@ -489,7 +566,6 @@ async def search_project_execute(message: Message, state: FSMContext):
         )
 
 # --- КОМАНДЫ УПРАВЛЕНИЯ БАНОМ ---
-
 @router.message(Command("ban"))
 async def admin_ban(message: Message):
     """Забанить пользователя"""
@@ -779,15 +855,77 @@ async def admin_find_user(message: Message):
             "❌ Ошибка при поиске пользователя."
         )
 
-# --- ОСНОВНЫЕ АДМИН-КОМАНДЫ ---
+# --- НОВАЯ ФИЧА: СТАТИСТИКА СИСТЕМЫ ---
+@router.message(Command("system_stats"))
+async def system_stats(message: Message):
+    """Показать общую статистику системы"""
+    if not await is_user_admin(message.from_user.id):
+        return
+    
+    try:
+        # Получаем общую статистику
+        total_projects = supabase.table("projects")\
+            .select("*", count="exact")\
+            .execute()
+        
+        total_reviews = supabase.table("user_logs")\
+            .select("*", count="exact")\
+            .eq("action_type", "review")\
+            .execute()
+        
+        total_likes = supabase.table("user_logs")\
+            .select("*", count="exact")\
+            .eq("action_type", "like")\
+            .execute()
+        
+        total_banned = supabase.table("banned_users")\
+            .select("*", count="exact")\
+            .execute()
+        
+        # Считаем по категориям
+        categories_stats = {}
+        for cat_key in CATEGORIES.keys():
+            cat_count = supabase.table("projects")\
+                .select("*", count="exact")\
+                .eq("category", cat_key)\
+                .execute()
+            categories_stats[cat_key] = cat_count.count if hasattr(cat_count, 'count') else 0
+        
+        # Топ проектов
+        top_projects = supabase.table("projects")\
+            .select("*")\
+            .order("score", desc=True)\
+            .limit(5)\
+            .execute().data
+        
+        text = "<b>📊 СТАТИСТИКА СИСТЕМЫ</b>\n\n"
+        text += f"<b>📈 Общая статистика:</b>\n"
+        text += f"• 🏷 Проектов: {total_projects.count if hasattr(total_projects, 'count') else 0}\n"
+        text += f"• 💬 Отзывов: {total_reviews.count if hasattr(total_reviews, 'count') else 0}\n"
+        text += f"• ❤️ Лайков: {total_likes.count if hasattr(total_likes, 'count') else 0}\n"
+        text += f"• 🚫 Забанено: {total_banned.count if hasattr(total_banned, 'count') else 0}\n\n"
+        
+        text += f"<b>📂 По категориям:</b>\n"
+        for cat_key, cat_name in CATEGORIES.items():
+            text += f"• {cat_name}: {categories_stats[cat_key]}\n"
+        
+        if top_projects:
+            text += f"\n<b>🏆 ТОП-5 ПРОЕКТОВ:</b>\n"
+            for i, p in enumerate(top_projects, 1):
+                text += f"{i}. <b>{p['name']}</b> — {p['score']} баллов\n"
+        
+        await message.reply(text, parse_mode="HTML")
+        
+    except Exception as e:
+        logging.error(f"Ошибка в /system_stats: {e}")
+        await message.reply("❌ Ошибка при получении статистики.")
 
+# --- ОСНОВНЫЕ АДМИН-КОМАНДЫ ---
 @router.message(Command("add"))
-async def admin_add(message: Message, state: FSMContext):
+async def admin_add(message: Message):
     if not await is_user_admin(message.from_user.id): 
         return
         
-    await state.clear()
-    
     try:
         if len(message.text.split()) < 2:
             await message.reply(
@@ -876,12 +1014,10 @@ async def admin_add(message: Message, state: FSMContext):
         )
 
 @router.message(Command("del"))
-async def admin_delete(message: Message, state: FSMContext):
+async def admin_delete(message: Message):
     if not await is_user_admin(message.from_user.id): 
         return
         
-    await state.clear()
-    
     try:
         if len(message.text.split()) < 2:
             await message.reply(
@@ -1008,7 +1144,8 @@ async def admin_score(message: Message, state: FSMContext):
             f"🔢 Текущий рейтинг: <b>{project['score']}</b>\n"
             f"📊 Изменение: <code>{val:+d}</code>\n"
             f"🔢 Новый рейтинг будет: <b>{project['score'] + val}</b>",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=cancel_kb()
         )
             
     except Exception as e:
@@ -1020,6 +1157,12 @@ async def admin_score(message: Message, state: FSMContext):
 @router.message(AdminScoreState.waiting_for_reason)
 async def admin_score_reason(message: Message, state: FSMContext):
     """Обработка причины изменения рейтинга"""
+    # Обрабатываем кнопку отмены
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("❌ Изменение рейтинга отменено.", reply_markup=main_kb())
+        return
+    
     if message.text.startswith("/"):
         await state.clear()
         return
@@ -1075,7 +1218,8 @@ async def admin_score_reason(message: Message, state: FSMContext):
             f"🏷 Проект: <b>{project_name}</b>\n"
             f"🔢 {old_score} → <b>{new_score}</b> ({change_amount:+d})\n"
             f"📝 Причина: <i>{reason}</i>",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=main_kb()
         )
         
     except Exception as e:
@@ -1087,12 +1231,10 @@ async def admin_score_reason(message: Message, state: FSMContext):
     await state.clear()
 
 @router.message(Command("delrev"))
-async def admin_delrev(message: Message, state: FSMContext):
+async def admin_delrev(message: Message):
     if not await is_user_admin(message.from_user.id): 
         return
         
-    await state.clear()
-    
     try:
         if len(message.text.split()) < 2:
             await message.reply(
@@ -1180,7 +1322,6 @@ async def admin_delrev(message: Message, state: FSMContext):
         )
 
 # --- ДОПОЛНИТЕЛЬНЫЕ АДМИН-КОМАНДЫ ---
-
 @router.message(Command("editdesc"))
 async def admin_edit_desc(message: Message):
     """Изменить описание проекта"""
@@ -1287,7 +1428,8 @@ async def admin_add_photo(message: Message, state: FSMContext):
             f"🏷 Проект: <b>{project['name']}</b>\n"
             f"🆔 ID: <code>{project['id']}</code>\n\n"
             f"<i>Отправьте фото в ответ на это сообщение</i>",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=cancel_kb()
         )
         
     except Exception as e:
@@ -1324,21 +1466,28 @@ async def admin_save_photo(message: Message, state: FSMContext):
         await message.reply_photo(
             photo=photo_file_id,
             caption=f"✅ Фото для проекта <b>{project_name}</b> успешно сохранено!",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=main_kb()
         )
     else:
         await message.reply(
-            "❌ Ошибка при сохранении фото."
+            "❌ Ошибка при сохранении фото.",
+            reply_markup=main_kb()
         )
     
     await state.clear()
 
 @router.message(EditProjectState.waiting_for_photo)
-async def admin_wrong_photo(message: Message):
+async def admin_wrong_photo(message: Message, state: FSMContext):
     """Неправильный ввод при ожидании фото"""
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("❌ Добавление фото отменено.", reply_markup=main_kb())
+        return
+    
     await message.reply(
         "❌ Пожалуйста, отправьте фотографию.\n"
-        "Отправьте фото или используйте /cancel для отмены."
+        "Отправьте фото или используйте ❌ Отмена для отмены."
     )
 
 @router.message(Command("stats"))
@@ -1490,7 +1639,6 @@ async def admin_list_projects(message: Message):
         )
 
 # --- ЛОГИКА ПОЛЬЗОВАТЕЛЯ ---
-
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -1552,19 +1700,23 @@ async def show_cat(message: Message):
     cat_key = [k for k, v in CATEGORIES.items() if v == message.text][0]
     await show_projects_batch(cat_key, 0, message, is_first_batch=True)
 
+# --- ОБНОВЛЕННЫЕ ОБРАБОТЧИКИ ДЛЯ ПРОЕКТОВ ---
 @router.callback_query(F.data.startswith("panel_"))
 async def open_panel(call: CallbackQuery):
     """Открывает панель управления проектом в том же сообщении"""
     p_id = call.data.split("_")[1]
     
     # Получаем информацию о проекте
-    project = supabase.table("projects").select("*").eq("id", p_id).single().execute().data
+    project = await find_project_by_id(int(p_id))
     if not project:
         await call.answer("Проект не найден.", show_alert=True)
         return
     
+    # Проверяем права админа
+    is_admin = await is_user_admin(call.from_user.id)
+    
     # Получаем фото проекта
-    photo_file_id = await get_project_photo(p_id)
+    photo_file_id = await get_project_photo(int(p_id))
     
     # Получаем последние изменения
     recent_changes = supabase.table("rating_history").select("*")\
@@ -1575,8 +1727,12 @@ async def open_panel(call: CallbackQuery):
     
     text = f"<b>🔘 ПАНЕЛЬ УПРАВЛЕНИЯ</b>\n\n"
     text += f"<b>{project['name']}</b>\n"
-    text += f"{project['description']}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+    text += f"{project['description'][:200]}{'...' if len(project['description']) > 200 else ''}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
     text += f"📊 Текущий рейтинг: <b>{project['score']}</b>\n\n"
+    
+    if is_admin:
+        text += f"👮 <b>Вы администратор</b>\n"
+        text += f"Доступны дополнительные функции управления\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
     
     if recent_changes:
         text += f"<b>📈 Последние изменения:</b>\n"
@@ -1590,9 +1746,38 @@ async def open_panel(call: CallbackQuery):
     
     # Если в исходном сообщении есть фото
     if call.message.photo:
-        await safe_edit_media(call, text, reply_markup=project_panel_kb(p_id))
+        await safe_edit_media(call, text, reply_markup=project_panel_kb(p_id, is_admin))
     else:
-        await safe_edit_message(call, text, reply_markup=project_panel_kb(p_id))
+        await safe_edit_message(call, text, reply_markup=project_panel_kb(p_id, is_admin))
+    
+    await call.answer()
+
+@router.callback_query(F.data.startswith("adminpanel_"))
+async def open_admin_panel(call: CallbackQuery):
+    """Открывает админскую панель управления проектом"""
+    if not await is_user_admin(call.from_user.id):
+        await call.answer("❌ Доступно только администраторам", show_alert=True)
+        return
+    
+    p_id = call.data.split("_")[1]
+    project = await find_project_by_id(int(p_id))
+    
+    if not project:
+        await call.answer("Проект не найден.", show_alert=True)
+        return
+    
+    text = f"<b>👮 АДМИН-ПАНЕЛЬ УПРАВЛЕНИЯ</b>\n\n"
+    text += f"<b>{project['name']}</b>\n"
+    text += f"🆔 ID: <code>{project['id']}</code>\n"
+    text += f"📂 Категория: <code>{project['category']}</code>\n"
+    text += f"🔢 Рейтинг: <b>{project['score']}</b>\n"
+    text += f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n"
+    text += f"<i>Выберите действие:</i>"
+    
+    if call.message.photo:
+        await safe_edit_media(call, text, reply_markup=admin_panel_kb(p_id))
+    else:
+        await safe_edit_message(call, text, reply_markup=admin_panel_kb(p_id))
     
     await call.answer()
 
@@ -1602,14 +1787,45 @@ async def back_to_panel(call: CallbackQuery):
     p_id = call.data.split("_")[1]
     await open_panel(call)
 
+@router.callback_query(F.data == "back_to_text")
+async def back_to_text(call: CallbackQuery, state: FSMContext):
+    """Возврат к вводу текста отзыва"""
+    data = await state.get_data()
+    if 'p_id' in data:
+        p_id = data['p_id']
+        project = await find_project_by_id(int(p_id))
+        project_name = project['name'] if project else "Проект"
+        
+        txt = f"📝 <b>Введите текст отзыва для проекта {project_name}:</b>\n\n"
+        txt += "<i>Напишите ваш отзыв или используйте '❌ Отмена' для отмены</i>"
+        
+        if call.message.photo:
+            await safe_edit_media(call, txt, reply_markup=back_to_panel_kb(p_id))
+        else:
+            await safe_edit_message(call, txt, reply_markup=back_to_panel_kb(p_id))
+        
+        await state.set_state(ReviewState.waiting_for_text)
+    await call.answer()
+
 @router.callback_query(F.data.startswith("rev_"))
 async def rev_start(call: CallbackQuery, state: FSMContext):
     p_id = call.data.split("_")[1]
+    
+    # Проверяем, не забанен ли пользователь
+    ban_result = supabase.table("banned_users")\
+        .select("*")\
+        .eq("user_id", call.from_user.id)\
+        .execute()
+    
+    if ban_result.data:
+        await call.answer("🚫 Вы заблокированы и не можете оставлять отзывы!", show_alert=True)
+        return
+    
     check = supabase.table("user_logs").select("*").eq("user_id", call.from_user.id).eq("project_id", p_id).eq("action_type", "review").execute()
     await state.update_data(p_id=p_id)
     await state.set_state(ReviewState.waiting_for_text)
     
-    project = supabase.table("projects").select("name").eq("id", p_id).single().execute().data
+    project = await find_project_by_id(int(p_id))
     project_name = project['name'] if project else "Проект"
     
     txt = f"📝 <b>Изменение отзыва для проекта {project_name}</b>\n\nВведите новый текст отзыва:"
@@ -1625,22 +1841,55 @@ async def rev_start(call: CallbackQuery, state: FSMContext):
 
 @router.message(ReviewState.waiting_for_text)
 async def rev_text(message: Message, state: FSMContext):
+    # Железобетонная обработка кнопки "Назад в меню"
+    if message.text == "⬅️ Назад в меню":
+        await state.clear()
+        await message.answer("Главное меню:", reply_markup=main_kb())
+        return
+    
+    # Обработка кнопки "Отмена"
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("❌ Создание отзыва отменено.", reply_markup=main_kb())
+        return
+    
     if message.text and message.text.startswith("/"): 
         return 
     
     await state.update_data(txt=message.text)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⭐"*i, callback_data=f"st_{i}")] for i in range(5, 0, -1)
-    ])
-    
     await state.set_state(ReviewState.waiting_for_rate)
+    
+    # Получаем ID проекта из state
+    data = await state.get_data()
+    p_id = data.get('p_id')
+    
+    kb = rating_kb()
     await message.answer("🌟 <b>Выберите оценку:</b>", reply_markup=kb, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("st_"), ReviewState.waiting_for_rate)
 async def rev_end(call: CallbackQuery, state: FSMContext):
-    rate = int(call.data.split("_")[1]); data = await state.get_data(); p_id = data['p_id']
+    rate = int(call.data.split("_")[1])
+    data = await state.get_data()
+    p_id = data['p_id']
+    
+    # Проверяем, не забанен ли пользователь
+    ban_result = supabase.table("banned_users")\
+        .select("*")\
+        .eq("user_id", call.from_user.id)\
+        .execute()
+    
+    if ban_result.data:
+        await call.answer("🚫 Вы заблокированы и не можете оставлять отзывы!", show_alert=True)
+        await state.clear()
+        return
+    
     old_rev = supabase.table("user_logs").select("*").eq("user_id", call.from_user.id).eq("project_id", p_id).eq("action_type", "review").execute()
-    p = supabase.table("projects").select("*").eq("id", p_id).single().execute().data
+    p = await find_project_by_id(int(p_id))
+    
+    if not p:
+        await call.answer("❌ Проект не найден", show_alert=True)
+        await state.clear()
+        return
     
     old_score = p['score']
     rating_change = RATING_MAP[rate]
@@ -1651,7 +1900,8 @@ async def rev_end(call: CallbackQuery, state: FSMContext):
         rating_change = RATING_MAP[rate] - old_rating_change
         new_score = old_score + rating_change
         supabase.table("user_logs").update({"review_text": data['txt'], "rating_val": rate}).eq("id", old_rev.data[0]['id']).execute()
-        res_txt = "обновлен"; log_id = old_rev.data[0]['id']
+        res_txt = "обновлен"
+        log_id = old_rev.data[0]['id']
         reason = f"Изменение отзыва: {old_rev.data[0]['rating_val']}/5 → {rate}/5"
     else:
         new_score = old_score + rating_change
@@ -1662,7 +1912,8 @@ async def rev_end(call: CallbackQuery, state: FSMContext):
             "review_text": data['txt'], 
             "rating_val": rate
         }).execute()
-        res_txt = "добавлен"; log_id = log.data[0]['id']
+        res_txt = "добавлен"
+        log_id = log.data[0]['id']
         reason = f"Новый отзыв: {rate}/5"
 
     supabase.table("projects").update({"score": new_score}).eq("id", p_id).execute()
@@ -1710,7 +1961,7 @@ async def view_reviews(call: CallbackQuery):
     p_id = call.data.split("_")[1]
     revs = supabase.table("user_logs").select("*").eq("project_id", p_id).eq("action_type", "review").order("created_at", desc=True).limit(5).execute().data
     
-    project = supabase.table("projects").select("name").eq("id", p_id).single().execute().data
+    project = await find_project_by_id(int(p_id))
     project_name = project['name'] if project else "Проект"
     
     if not revs: 
@@ -1744,7 +1995,7 @@ async def view_history(call: CallbackQuery):
     p_id = call.data.split("_")[1]
     
     # Получаем информацию о проекте
-    project = supabase.table("projects").select("*").eq("id", p_id).single().execute().data
+    project = await find_project_by_id(int(p_id))
     if not project:
         await call.answer("Проект не найден.", show_alert=True)
         return
@@ -1786,13 +2037,24 @@ async def view_history(call: CallbackQuery):
 @router.callback_query(F.data.startswith("like_"))
 async def handle_like(call: CallbackQuery):
     p_id = call.data.split("_")[1]
+    
+    # Проверяем, не забанен ли пользователь
+    ban_result = supabase.table("banned_users")\
+        .select("*")\
+        .eq("user_id", call.from_user.id)\
+        .execute()
+    
+    if ban_result.data:
+        await call.answer("🚫 Вы заблокированы и не можете ставить лайки!", show_alert=True)
+        return
+    
     check = supabase.table("user_logs").select("id").eq("user_id", call.from_user.id).eq("project_id", p_id).eq("action_type", "like").execute()
     if check.data: 
         await call.answer("Вы уже поддержали этот проект!", show_alert=True)
         return
     
     # Получаем текущий рейтинг
-    project = supabase.table("projects").select("*").eq("id", p_id).single().execute().data
+    project = await find_project_by_id(int(p_id))
     if not project:
         await call.answer("Проект не найден.", show_alert=True)
         return
@@ -1832,6 +2094,259 @@ async def close_panel(call: CallbackQuery):
     """Закрытие панели - удаление сообщения с панелью"""
     await call.message.delete()
     await call.answer("Панель закрыта")
+
+# --- НОВЫЕ ФИЧИ: АДМИН-ДЕЙСТВИЯ ЧЕРЕЗ КНОПКИ ---
+@router.callback_query(F.data.startswith("edit_"))
+async def edit_project_start(call: CallbackQuery):
+    """Начало редактирования проекта"""
+    if not await is_user_admin(call.from_user.id):
+        await call.answer("❌ Доступно только администраторам", show_alert=True)
+        return
+    
+    p_id = call.data.split("_")[1]
+    await open_admin_panel(call)
+
+@router.callback_query(F.data.startswith("editdesc_"))
+async def edit_description_start(call: CallbackQuery, state: FSMContext):
+    """Начало изменения описания проекта"""
+    if not await is_user_admin(call.from_user.id):
+        await call.answer("❌ Доступно только администраторам", show_alert=True)
+        return
+    
+    p_id = call.data.split("_")[1]
+    project = await find_project_by_id(int(p_id))
+    
+    if not project:
+        await call.answer("Проект не найден", show_alert=True)
+        return
+    
+    await state.update_data(
+        project_id=p_id,
+        project_name=project['name'],
+        old_description=project['description']
+    )
+    await state.set_state(EditProjectState.waiting_for_description)
+    
+    text = f"📝 <b>Редактирование описания проекта</b>\n\n"
+    text += f"🏷 Проект: <b>{project['name']}</b>\n"
+    text += f"📝 Текущее описание:\n<i>{project['description'][:200]}...</i>\n\n"
+    text += f"✏️ <b>Введите новое описание:</b>"
+    
+    if call.message.photo:
+        await safe_edit_media(call, text, reply_markup=cancel_kb())
+    else:
+        await safe_edit_message(call, text, reply_markup=cancel_kb())
+    
+    await call.answer()
+
+@router.message(EditProjectState.waiting_for_description)
+async def edit_description_save(message: Message, state: FSMContext):
+    """Сохранение нового описания проекта"""
+    if message.text == "❌ Отмена":
+        data = await state.get_data()
+        await state.clear()
+        await message.answer("❌ Изменение описания отменено.", reply_markup=main_kb())
+        return
+    
+    data = await state.get_data()
+    project_id = data['project_id']
+    project_name = data['project_name']
+    old_description = data['old_description']
+    new_description = message.text.strip()
+    
+    if not new_description:
+        await message.reply("❌ Описание не может быть пустым!")
+        return
+    
+    # Обновляем описание в базе
+    supabase.table("projects").update({"description": new_description}).eq("id", project_id).execute()
+    
+    # Отправляем лог
+    log_text = (f"📝 <b>Изменено описание проекта:</b>\n\n"
+               f"🏷 Проект: <b>{project_name}</b> (ID: {project_id})\n"
+               f"📝 <b>Было:</b> <i>{old_description[:200]}...</i>\n"
+               f"📝 <b>Стало:</b> <i>{new_description[:200]}...</i>\n"
+               f"👤 Админ: @{message.from_user.username or message.from_user.id}")
+    
+    project = await find_project_by_id(int(project_id))
+    if project:
+        await send_log_to_topics(log_text, project['category'])
+    
+    await message.reply(
+        f"✅ Описание проекта <b>{project_name}</b> успешно обновлено!",
+        parse_mode="HTML",
+        reply_markup=main_kb()
+    )
+    
+    await state.clear()
+
+@router.callback_query(F.data.startswith("addphoto_"))
+async def add_photo_start(call: CallbackQuery, state: FSMContext):
+    """Начало добавления фото проекта"""
+    if not await is_user_admin(call.from_user.id):
+        await call.answer("❌ Доступно только администраторам", show_alert=True)
+        return
+    
+    p_id = call.data.split("_")[1]
+    project = await find_project_by_id(int(p_id))
+    
+    if not project:
+        await call.answer("Проект не найден", show_alert=True)
+        return
+    
+    await state.update_data(
+        project_id=p_id,
+        project_name=project['name'],
+        category=project['category']
+    )
+    await state.set_state(EditProjectState.waiting_for_photo)
+    
+    text = f"📸 <b>Добавление фото проекта</b>\n\n"
+    text += f"🏷 Проект: <b>{project['name']}</b>\n"
+    text += f"🆔 ID: <code>{project['id']}</code>\n\n"
+    text += f"<i>Отправьте фотографию в ответ на это сообщение</i>"
+    
+    if call.message.photo:
+        await safe_edit_media(call, text, reply_markup=cancel_kb())
+    else:
+        await safe_edit_message(call, text, reply_markup=cancel_kb())
+    
+    await call.answer()
+
+@router.callback_query(F.data.startswith("changescore_"))
+async def change_score_start(call: CallbackQuery, state: FSMContext):
+    """Начало изменения рейтинга проекта"""
+    if not await is_user_admin(call.from_user.id):
+        await call.answer("❌ Доступно только администраторам", show_alert=True)
+        return
+    
+    p_id = call.data.split("_")[1]
+    project = await find_project_by_id(int(p_id))
+    
+    if not project:
+        await call.answer("Проект не найден", show_alert=True)
+        return
+    
+    await state.update_data(
+        project_id=project['id'],
+        project_name=project['name'],
+        category=project['category'],
+        old_score=project['score']
+    )
+    await state.set_state(AdminScoreState.waiting_for_reason)
+    
+    text = f"⚖️ <b>Изменение рейтинга проекта</b>\n\n"
+    text += f"🏷 Проект: <b>{project['name']}</b>\n"
+    text += f"🔢 Текущий рейтинг: <b>{project['score']}</b>\n\n"
+    text += f"📝 <b>Введите изменение рейтинга (например: +10 или -5):</b>"
+    
+    if call.message.photo:
+        await safe_edit_media(call, text, reply_markup=cancel_kb())
+    else:
+        await safe_edit_message(call, text, reply_markup=cancel_kb())
+    
+    await call.answer()
+
+@router.callback_query(F.data.startswith("deleteproj_"))
+async def delete_project_confirm(call: CallbackQuery):
+    """Подтверждение удаления проекта"""
+    if not await is_user_admin(call.from_user.id):
+        await call.answer("❌ Доступно только администраторам", show_alert=True)
+        return
+    
+    p_id = call.data.split("_")[1]
+    project = await find_project_by_id(int(p_id))
+    
+    if not project:
+        await call.answer("Проект не найден", show_alert=True)
+        return
+    
+    # Создаем клавиатуру подтверждения
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirmdel_{p_id}"),
+            InlineKeyboardButton(text="❌ Нет, отменить", callback_data=f"adminpanel_{p_id}")
+        ]
+    ])
+    
+    text = f"⚠️ <b>ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ</b>\n\n"
+    text += f"Вы уверены, что хотите удалить проект?\n\n"
+    text += f"🏷 Название: <b>{project['name']}</b>\n"
+    text += f"📂 Категория: <code>{project['category']}</code>\n"
+    text += f"🔢 Рейтинг: <b>{project['score']}</b>\n"
+    text += f"🆔 ID: <code>{project['id']}</code>\n\n"
+    text += f"<i>Это действие нельзя отменить!</i>"
+    
+    if call.message.photo:
+        await safe_edit_media(call, text, reply_markup=kb)
+    else:
+        await safe_edit_message(call, text, reply_markup=kb)
+    
+    await call.answer()
+
+@router.callback_query(F.data.startswith("confirmdel_"))
+async def delete_project_execute(call: CallbackQuery):
+    """Выполнение удаления проекта"""
+    if not await is_user_admin(call.from_user.id):
+        await call.answer("❌ Доступно только администраторам", show_alert=True)
+        return
+    
+    p_id = call.data.split("_")[1]
+    project = await find_project_by_id(int(p_id))
+    
+    if not project:
+        await call.answer("Проект не найден", show_alert=True)
+        return
+    
+    project_id = project['id']
+    category = project['category']
+    score = project['score']
+    
+    # Считаем сколько отзывов удаляем
+    reviews_count = supabase.table("user_logs").select("*").eq("project_id", project_id).execute()
+    reviews_num = len(reviews_count.data) if reviews_count.data else 0
+    
+    # Добавляем запись в историю
+    supabase.table("rating_history").insert({
+        "project_id": project_id,
+        "admin_id": call.from_user.id,
+        "admin_username": call.from_user.username,
+        "change_type": "delete",
+        "score_before": score,
+        "score_after": 0,
+        "change_amount": -score,
+        "reason": "Удаление проекта через панель",
+        "is_admin_action": True
+    }).execute()
+    
+    # Удаление проекта и связанных отзывов
+    supabase.table("projects").delete().eq("id", project_id).execute()
+    supabase.table("user_logs").delete().eq("project_id", project_id).execute()
+    supabase.table("rating_history").delete().eq("project_id", project_id).execute()
+    supabase.table("project_photos").delete().eq("project_id", project_id).execute()
+    
+    # Отправляем лог
+    log_text = (f"🗑 <b>Проект удален через панель:</b>\n\n"
+               f"🏷 Название: <b>{project['name']}</b>\n"
+               f"📂 Категория: <code>{category}</code>\n"
+               f"📊 Удалено отзывов: {reviews_num}\n"
+               f"🔢 Финальный рейтинг: {score}\n"
+               f"👤 Админ: @{call.from_user.username or call.from_user.id}")
+    
+    await send_log_to_topics(log_text, category)
+    
+    # Удаляем сообщение с панелью
+    await call.message.delete()
+    
+    # Отправляем подтверждение
+    await call.message.answer(
+        f"🗑 Проект <b>{project['name']}</b> удален!\n"
+        f"📊 Удалено отзывов: {reviews_num}\n"
+        f"🔢 Финальный рейтинг: {score}",
+        parse_mode="HTML"
+    )
+    
+    await call.answer()
 
 async def main():
     logging.basicConfig(level=logging.INFO)
