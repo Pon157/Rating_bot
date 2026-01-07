@@ -1313,49 +1313,88 @@ async def admin_list_projects(message: Message):
         return
         
     try:
+        # Отправляем сообщение о загрузке
+        loading_msg = await message.reply("⏳ Загружаем список проектов...")
+        
+        # Получаем все проекты
         projects = supabase.table("projects").select("*").order("score", desc=True).execute().data
         
         if not projects:
+            await loading_msg.delete()
             await message.reply("📭 Список проектов пуст.")
             return
         
-        text = "<b>📋 СПИСОК ВСЕХ ПРОЕКТОВ</b>\n\n"
+        # Получаем все отзывы одним запросом
+        all_reviews = supabase.table("user_logs")\
+            .select("project_id")\
+            .eq("action_type", "review")\
+            .execute().data
         
-        for i, p in enumerate(projects, 1):
-            # Получаем количество отзывов
-            reviews_count = supabase.table("user_logs")\
-                .select("*")\
-                .eq("project_id", p['id'])\
-                .eq("action_type", "review")\
-                .execute()
-            
-            reviews_num = len(reviews_count.data) if reviews_count.data else 0
-            
-            # Экранируем специальные символы в данных
-            project_name = escape(str(p['name']))
-            category = escape(str(p['category']))
-            
-            text += f"<b>{i}. {project_name}</b>\n"
-            text += f"   🆔 ID: <code>{p['id']}</code>\n"
-            text += f"   📂 Категория: <code>{category}</code>\n"
-            text += f"   🔢 Рейтинг: <b>{p['score']}</b>\n"
-            text += f"   💬 Отзывов: {reviews_num}\n"
-            text += f"   ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+        # Создаем словарь: project_id -> количество отзывов
+        review_counts = {}
+        for review in all_reviews:
+            project_id = review['project_id']
+            review_counts[project_id] = review_counts.get(project_id, 0) + 1
         
-        text += f"\n📊 Всего проектов: <b>{len(projects)}</b>"
+        # Удаляем сообщение о загрузке
+        await loading_msg.delete()
         
-        # Разбиваем на части если слишком длинное
-        if len(text) > 4000:
-            parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
-            for part in parts:
-                await message.answer(part, parse_mode="HTML")
-        else:
-            await message.reply(text, parse_mode="HTML")
+        # Отправляем общую статистику
+        total_projects = len(projects)
+        total_reviews = len(all_reviews)
+        
+        stats_text = (
+            f"<b>📊 ОБЩАЯ СТАТИСТИКА</b>\n\n"
+            f"📋 Всего проектов: <b>{total_projects}</b>\n"
+            f"💬 Всего отзывов: <b>{total_reviews}</b>\n"
+            f"📈 Среднее отзывов на проект: <b>{total_reviews/total_projects:.1f}</b>\n\n"
+            f"<i>Отправляю список проектов...</i>"
+        )
+        
+        await message.reply(stats_text, parse_mode="HTML")
+        
+        # Разбиваем проекты на части по 20 штук
+        chunk_size = 20
+        for chunk_num in range(0, len(projects), chunk_size):
+            chunk = projects[chunk_num:chunk_num + chunk_size]
+            
+            text = f"<b>📋 ПРОЕКТЫ {chunk_num+1}-{min(chunk_num+chunk_size, total_projects)} из {total_projects}</b>\n\n"
+            
+            for i, p in enumerate(chunk, start=chunk_num+1):
+                # Получаем количество отзывов из словаря
+                reviews_num = review_counts.get(p['id'], 0)
+                
+                # Экранируем специальные символы в данных
+                project_name = escape(str(p['name']))
+                category = escape(str(p['category']))
+                
+                text += f"<b>{i}. {project_name}</b>\n"
+                text += f"   🆔 ID: <code>{p['id']}</code>\n"
+                text += f"   📂 Категория: <code>{category}</code>\n"
+                text += f"   🔢 Рейтинг: <b>{p['score']}</b>\n"
+                text += f"   💬 Отзывов: {reviews_num}\n"
+                text += f"   ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            
+            # Если это последний чанк, добавляем итоговую статистику
+            if chunk_num + chunk_size >= total_projects:
+                # Находим проект с максимальным рейтингом
+                top_project = max(projects, key=lambda x: x['score'])
+                top_project_name = escape(str(top_project['name']))
+                
+                text += f"\n<b>🏆 ЛИДЕР:</b>\n"
+                text += f"<b>{top_project_name}</b> — <code>{top_project['score']}</code> баллов\n"
+                text += f"💬 Отзывов: {review_counts.get(top_project['id'], 0)}"
+            
+            await message.answer(text, parse_mode="HTML")
+            
+            # Небольшая пауза между сообщениями
+            if chunk_num + chunk_size < total_projects:
+                await asyncio.sleep(0.5)
         
     except Exception as e:
         logging.error(f"Ошибка в /list: {e}")
         await message.reply(
-            "❌ Ошибка при получении списка проектов."
+            f"❌ Ошибка при получении списка проектов: {str(e)[:100]}"
         )
 
 # --- КОМАНДЫ УПРАВЛЕНИЯ БАНОМ ---
