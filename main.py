@@ -1765,9 +1765,14 @@ async def admin_list_projects(message: Message):
             
             reviews_num = len(reviews_count.data) if reviews_count.data else 0
             
-            text += f"<b>{i}. {p['name']}</b>\n"
+            # Экранируем специальные символы в данных
+            from html import escape
+            project_name = escape(str(p['name']))
+            category = escape(str(p['category']))
+            
+            text += f"<b>{i}. {project_name}</b>\n"
             text += f"   🆔 ID: <code>{p['id']}</code>\n"
-            text += f"   📂 Категория: <code>{p['category']}</code>\n"
+            text += f"   📂 Категория: <code>{category}</code>\n"
             text += f"   🔢 Рейтинг: <b>{p['score']}</b>\n"
             text += f"   💬 Отзывов: {reviews_num}\n"
             text += f"   ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
