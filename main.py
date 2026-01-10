@@ -63,6 +63,16 @@ class EditProjectState(StatesGroup):
 class SearchState(StatesGroup):
     waiting_for_query = State()
 
+@router.message(Command("myid"))
+async def get_my_id(message: Message):
+    """Показать ID пользователя для веб-авторизации"""
+    await message.reply(
+        f"🆔 <b>Ваш Telegram ID:</b>\n"
+        f"<code>{message.from_user.id}</code>\n\n"
+        f"Используйте этот ID для авторизации на сайте.",
+        parse_mode="HTML"
+    )
+
 # --- ПРОВЕРКА ПРАВ (ПО ЧАТУ) ---
 async def is_user_admin(user_id: int) -> bool:
     try:
