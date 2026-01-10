@@ -14,6 +14,24 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from html import escape  # Добавлен для экранирования HTML
+from fastapi import FastAPI
+import threading
+
+# Создайте FastAPI приложение в отдельном потоке
+def run_webhook_server():
+    web_app = FastAPI()
+    
+    @web_app.post("/webhook/bot")
+    async def bot_webhook(data: dict):
+        # Обработка веб-хуков от сайта
+        pass
+    
+    import uvicorn
+    uvicorn.run(web_app, host="0.0.0.0", port=8001)
+
+# Запустите в отдельном потоке
+webhook_thread = threading.Thread(target=run_webhook_server)
+webhook_thread.start()
 
 # --- НАСТРОЙКИ ТОПИКОВ (Замени цифры на ID из ссылок) ---
 TOPIC_LOGS_ALL = 46  # Общий топик для ВСЕХ логов/отзывов
