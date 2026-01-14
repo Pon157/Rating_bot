@@ -1766,6 +1766,8 @@ async def cmd_start(message: Message, state: FSMContext):
         start_text += "Список пуст. Будьте первым, кто добавит проект!\n"
     
     start_text += "\n📊 <i>Нажмите на категорию ниже, чтобы увидеть все проекты</i>"
+    start_text += "\n <b><i>Партнеры KMBP Monthly Awards Season 1</i><b>"
+    start_text += "\n ✴ @The_infernal_paradise_bot"
     
     try:
         # Пробуем отправить с фото
