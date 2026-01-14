@@ -1733,9 +1733,9 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     
     # Проверяем бан
-    ban_result = supabase.table("banned_users")\
-        .select("*")\
-        .eq("user_id", message.from_user.id)\
+    ban_result = supabase.table("banned_users") \
+        .select("*") \
+        .eq("user_id", message.from_user.id) \
         .execute()
     
     if ban_result.data:
@@ -1750,38 +1750,45 @@ async def cmd_start(message: Message, state: FSMContext):
         return
     
     # Получаем топ проектов
-    top_projects = supabase.table("projects").select("*").order("score", desc=True).limit(5).execute().data
-    
-# Стартовое сообщение
-start_text = "<b>🌟 ДОБРО ПОЖАЛОВАТЬ В РЕЙТИНГ ПРОЕКТОВ КМБП!</b>\n\n"
-start_text += "Здесь вы можете оценивать проекты, оставлять отзывы и следить за рейтингом лучших проектов сообщества.\n\n"
+    top_projects = supabase.table("projects") \
+        .select("*") \
+        .order("score", desc=True) \
+        .limit(5) \
+        .execute().data
 
-if top_projects:
-    start_text += "<b>🏆 ТОП-5 ПРОЕКТОВ:</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-    for i, p in enumerate(top_projects, 1):
-        project_name_escaped = escape(str(p['name']))
-        start_text += f"{i}. <b>{project_name_escaped}</b> — <code>{p['score']}</code>\n"
-else:
-    start_text += "<b>🏆 ТОП-5 ПРОЕКТОВ:</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-    start_text += "Список пуст. Будьте первым, кто добавит проект!\n"
+    # Стартовое сообщение (внутри функции!)
+    start_text = "<b>🌟 ДОБРО ПОЖАЛОВАТЬ В РЕЙТИНГ ПРОЕКТОВ КМБП!</b>\n\n"
+    start_text += "Здесь вы можете оценивать проекты, оставлять отзывы и следить за рейтингом лучших проектов сообщества.\n\n"
+
+    if top_projects:
+        start_text += "<b>🏆 ТОП-5 ПРОЕКТОВ:</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+        for i, p in enumerate(top_projects, 1):
+            project_name_escaped = escape(str(p['name']))
+            start_text += f"{i}. <b>{project_name_escaped}</b> — <code>{p['score']}</code>\n"
+    else:
+        start_text += "<b>🏆 ТОП-5 ПРОЕКТОВ:</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+        start_text += "Список пуст. Будьте первым, кто добавит проект!\n"
 
 
-start_text += "\n📊 <i>Нажмите на категорию ниже, чтобы увидеть все проекты</i>"
-start_text += "\n<b><i>Партнеры KMBP Monthly Awards Season 1</i></b>"
-start_text += "\n✴ @The_infernal_paradise_bot"
+    start_text += "\n📊 <i>Нажмите на категорию ниже, чтобы увидеть все проекты</i>"
+    start_text += "\n<b><i>Партнеры KMBP Monthly Awards Season 1</i></b>"
+    start_text += "\n✴ @The_infernal_paradise_bot"
 
-try:
-    # Пробуем отправить с фото
-    photo = FSInputFile("start_photo.jpg")  # Убедись, что файл существует в папке с ботом
-    await message.answer_photo(
-        photo=photo,
-        caption=start_text,
-        reply_markup=main_kb(),
-        parse_mode="HTML"
-    )
-except:
-    # Если фото нет, отправляем просто текст
-    await message.answer(start_text, reply_markup=main_kb(), parse_mode="HTML")
+    try:
+        # Пробуем отправить с фото
+        photo = FSInputFile("start_photo.jpg")
+        await message.answer_photo(
+            photo=photo,
+            caption=start_text,
+            reply_markup=main_kb(),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        # Если фото нет, отправляем просто текст
+        print(f"Ошибка отправки фото: {e}")  # Логирование ошибки
+        await message.answer(start_text, reply_markup=main_kb(), parse_mode="HTML")
+
+
 
 
 @router.message(F.text.in_(CATEGORIES.values()))
@@ -1791,11 +1798,13 @@ async def show_cat(message: Message):
     await show_projects_batch(cat_key, 0, message, is_first_batch=True)
 
 
+
 # --- ОСНОВНЫЕ ОБРАБОТЧИКИ ПРОЕКТОВ ---
 @router.callback_query(F.data.startswith("panel_"))
 async def open_panel(call: CallbackQuery):
     """Открывает панель управления проектом"""
     p_id = call.data.split("_")[1]
+
     
     # Получаем информацию о проекте
     project = await find_project_by_id(int(p_id))
