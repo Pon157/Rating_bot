@@ -1767,28 +1767,29 @@ else:
 
 
 start_text += "\n📊 <i>Нажмите на категорию ниже, чтобы увидеть все проекты</i>"
-start_text += "\n<b><i>Партнеры KMBP Monthly Awards Season 1</i></b>"  # Исправлено: добавлен закрывающий тег
+start_text += "\n<b><i>Партнеры KMBP Monthly Awards Season 1</i></b>"
 start_text += "\n✴ @The_infernal_paradise_bot"
 
-    
-    try:
-        # Пробуем отправить с фото
-        photo = FSInputFile("start_photo.jpg")  # Убедись, что файл существует в папке с ботом
-        await message.answer_photo(
-            photo=photo,
-            caption=start_text,
-            reply_markup=main_kb(),
-            parse_mode="HTML"
-        )
-    except:
-        # Если фото нет, отправляем просто текст
-        await message.answer(start_text, reply_markup=main_kb(), parse_mode="HTML")
+try:
+    # Пробуем отправить с фото
+    photo = FSInputFile("start_photo.jpg")  # Убедись, что файл существует в папке с ботом
+    await message.answer_photo(
+        photo=photo,
+        caption=start_text,
+        reply_markup=main_kb(),
+        parse_mode="HTML"
+    )
+except:
+    # Если фото нет, отправляем просто текст
+    await message.answer(start_text, reply_markup=main_kb(), parse_mode="HTML")
+
 
 @router.message(F.text.in_(CATEGORIES.values()))
 async def show_cat(message: Message):
     """Показать первую партию проектов категории"""
     cat_key = [k for k, v in CATEGORIES.items() if v == message.text][0]
     await show_projects_batch(cat_key, 0, message, is_first_batch=True)
+
 
 # --- ОСНОВНЫЕ ОБРАБОТЧИКИ ПРОЕКТОВ ---
 @router.callback_query(F.data.startswith("panel_"))
