@@ -120,32 +120,32 @@ def main_kb():
         [KeyboardButton(text=v) for v in list(CATEGORIES.values())[:2]],
         [KeyboardButton(text=v) for v in list(CATEGORIES.values())[2:5]],
         [
-            KeyboardButton(text="🔍 Поиск проекта"),
-            KeyboardButton(text="⭐ Топ недели"),
-            KeyboardButton(text="📊 Топ месяца")
+            KeyboardButton(text="Поиск проекта"),
+            KeyboardButton(text="Топ недели"),
+            KeyboardButton(text="Топ месяца")
         ],
         [
-            KeyboardButton(text="👥 Реферальная система"),
-            KeyboardButton(text="📈 Мой прогресс")
+            KeyboardButton(text="Реферальная система"),
+            KeyboardButton(text="Мой прогресс")
         ]
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 def cancel_kb():
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="❌ Отмена")]],
+        keyboard=[[KeyboardButton(text="Отмена")]],
         resize_keyboard=True
     )
 
 def back_to_menu_kb():
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="⬅️ Назад в меню")]],
+        keyboard=[[KeyboardButton(text="Назад в меню")]],
         resize_keyboard=True
     )
 
 def project_card_kb(p_id):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔘 Открыть панель", callback_data=f"panel_{p_id}")]
+        [InlineKeyboardButton(text="Открыть панель", callback_data=f"panel_{p_id}")]
     ])
 
 def project_panel_kb(p_id, has_review=False):
