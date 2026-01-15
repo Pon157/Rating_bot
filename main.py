@@ -380,24 +380,38 @@ async def get_weekly_top(limit: int = 10):
     try:
         week_ago = (datetime.now() - timedelta(days=7)).isoformat()
         
+        # Сначала получаем все изменения за неделю
         result = supabase.table("rating_history")\
-            .select("project_id, SUM(change_amount) as total_change")\
+            .select("project_id, change_amount")\
             .gte("created_at", week_ago)\
-            .group("project_id")\
-            .order("total_change", desc=True)\
-            .limit(limit)\
             .execute()
         
-        top_projects = []
+        if not result.data:
+            return []
+        
+        # Группируем вручную в Python
+        changes_by_project = {}
         for item in result.data:
+            project_id = item['project_id']
+            change_amount = item['change_amount'] or 0
+            if project_id in changes_by_project:
+                changes_by_project[project_id] += change_amount
+            else:
+                changes_by_project[project_id] = change_amount
+        
+        # Сортируем по изменению
+        sorted_projects = sorted(changes_by_project.items(), key=lambda x: x[1], reverse=True)[:limit]
+        
+        top_projects = []
+        for project_id, total_change in sorted_projects:
             project_result = supabase.table("projects")\
                 .select("*")\
-                .eq("id", item['project_id'])\
+                .eq("id", project_id)\
                 .execute()
             
             if project_result.data:
                 project = project_result.data[0]
-                project['weekly_change'] = item['total_change']
+                project['weekly_change'] = total_change
                 top_projects.append(project)
         
         return top_projects
@@ -412,24 +426,38 @@ async def get_monthly_top(limit: int = 10):
     try:
         month_ago = (datetime.now() - timedelta(days=30)).isoformat()
         
+        # Сначала получаем все изменения за месяц
         result = supabase.table("rating_history")\
-            .select("project_id, SUM(change_amount) as total_change")\
+            .select("project_id, change_amount")\
             .gte("created_at", month_ago)\
-            .group("project_id")\
-            .order("total_change", desc=True)\
-            .limit(limit)\
             .execute()
         
-        top_projects = []
+        if not result.data:
+            return []
+        
+        # Группируем вручную в Python
+        changes_by_project = {}
         for item in result.data:
+            project_id = item['project_id']
+            change_amount = item['change_amount'] or 0
+            if project_id in changes_by_project:
+                changes_by_project[project_id] += change_amount
+            else:
+                changes_by_project[project_id] = change_amount
+        
+        # Сортируем по изменению
+        sorted_projects = sorted(changes_by_project.items(), key=lambda x: x[1], reverse=True)[:limit]
+        
+        top_projects = []
+        for project_id, total_change in sorted_projects:
             project_result = supabase.table("projects")\
                 .select("*")\
-                .eq("id", item['project_id'])\
+                .eq("id", project_id)\
                 .execute()
             
             if project_result.data:
                 project = project_result.data[0]
-                project['monthly_change'] = item['total_change']
+                project['monthly_change'] = total_change
                 top_projects.append(project)
         
         return top_projects
@@ -445,21 +473,32 @@ async def get_weekly_leaders(limit: int = 10):
         
         # Получаем активность пользователей за неделю
         result = supabase.table("rating_history")\
-            .select("user_id, username, SUM(change_amount) as total_impact")\
+            .select("user_id, username, change_amount")\
             .gte("created_at", week_ago)\
             .not_.is_("user_id", None)\
-            .group("user_id, username")\
-            .order("total_impact", desc=True)\
-            .limit(limit)\
             .execute()
         
-        leaders = []
+        if not result.data:
+            return []
+        
+        # Группируем вручную
+        impact_by_user = {}
         for item in result.data:
-            leaders.append({
-                "user_id": item['user_id'],
-                "username": item['username'],
-                "impact": item['total_impact'] or 0
-            })
+            user_id = item['user_id']
+            change_amount = item['change_amount'] or 0
+            username = item['username']
+            
+            if user_id in impact_by_user:
+                impact_by_user[user_id]['impact'] += change_amount
+            else:
+                impact_by_user[user_id] = {
+                    'user_id': user_id,
+                    'username': username,
+                    'impact': change_amount
+                }
+        
+        # Сортируем по влиянию
+        leaders = sorted(impact_by_user.values(), key=lambda x: x['impact'], reverse=True)[:limit]
         
         return leaders
         
@@ -472,22 +511,34 @@ async def get_monthly_leaders(limit: int = 10):
     try:
         month_ago = (datetime.now() - timedelta(days=30)).isoformat()
         
+        # Получаем активность пользователей за месяц
         result = supabase.table("rating_history")\
-            .select("user_id, username, SUM(change_amount) as total_impact")\
+            .select("user_id, username, change_amount")\
             .gte("created_at", month_ago)\
             .not_.is_("user_id", None)\
-            .group("user_id, username")\
-            .order("total_impact", desc=True)\
-            .limit(limit)\
             .execute()
         
-        leaders = []
+        if not result.data:
+            return []
+        
+        # Группируем вручную
+        impact_by_user = {}
         for item in result.data:
-            leaders.append({
-                "user_id": item['user_id'],
-                "username": item['username'],
-                "impact": item['total_impact'] or 0
-            })
+            user_id = item['user_id']
+            change_amount = item['change_amount'] or 0
+            username = item['username']
+            
+            if user_id in impact_by_user:
+                impact_by_user[user_id]['impact'] += change_amount
+            else:
+                impact_by_user[user_id] = {
+                    'user_id': user_id,
+                    'username': username,
+                    'impact': change_amount
+                }
+        
+        # Сортируем по влиянию
+        leaders = sorted(impact_by_user.values(), key=lambda x: x['impact'], reverse=True)[:limit]
         
         return leaders
         
