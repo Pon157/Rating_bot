@@ -13,40 +13,23 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
-from html import escape  # Добавлен для экранирования HTML
-from fastapi import FastAPI
+from html import escape
+import uuid
 import threading
 
-# Создайте FastAPI приложение в отдельном потоке
-def run_webhook_server():
-    web_app = FastAPI()
-    
-    @web_app.post("/webhook/bot")
-    async def bot_webhook(data: dict):
-        # Обработка веб-хуков от сайта
-        pass
-    
-    import uvicorn
-    uvicorn.run(web_app, host="0.0.0.0", port=8001)
-
-# Запустите в отдельном потоке
-webhook_thread = threading.Thread(target=run_webhook_server)
-webhook_thread.start()
-
-# --- НАСТРОЙКИ ТОПИКОВ (Замени цифры на ID из ссылок) ---
-TOPIC_LOGS_ALL = 46  # Общий топик для ВСЕХ логов/отзывов
-
+# --- НАСТРОЙКИ ТОПИКОВ ---
+TOPIC_LOGS_ALL = 46
 TOPICS_BY_CATEGORY = {
-    "support_bots": 38,    # Топик для Ботов поддержки
-    "support_admins": 41,  # Топик для Админов поддержки
-    "lot_channels": 39,    # Топик для Каналов лотов
-    "check_channels": 42,  # Топик для Каналов проверок
-    "kmbp_channels": 40    # Топик для Каналов КМБП
+    "support_bots": 38,
+    "support_admins": 41,
+    "lot_channels": 39,
+    "check_channels": 42,
+    "kmbp_channels": 40
 }
 
 # --- ИНИЦИАЛИЗАЦИЯ ---
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN") 
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ADMIN_GROUP_ID = int(os.getenv("ADMIN_CHAT_ID", 0))
@@ -81,17 +64,11 @@ class EditProjectState(StatesGroup):
 class SearchState(StatesGroup):
     waiting_for_query = State()
 
-@router.message(Command("myid"))
-async def get_my_id(message: Message):
-    """Показать ID пользователя для веб-авторизации"""
-    await message.reply(
-        f"🆔 <b>Ваш Telegram ID:</b>\n"
-        f"<code>{message.from_user.id}</code>\n\n"
-        f"Используйте этот ID для авторизации на сайте.",
-        parse_mode="HTML"
-    )
+# --- СИСТЕМА РЕФЕРАЛОВ ---
+class ReferralState(StatesGroup):
+    waiting_for_referral_code = State()
 
-# --- ПРОВЕРКА ПРАВ (ПО ЧАТУ) ---
+# --- ПРОВЕРКА ПРАВ ---
 async def is_user_admin(user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(chat_id=ADMIN_GROUP_ID, user_id=user_id)
@@ -105,24 +82,19 @@ class AccessMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         user = data.get("event_from_user")
         
-        # Проверяем, что это сообщение от пользователя (не от бота)
-        if not user or user.is_bot: 
+        if not user or user.is_bot:
             return await handler(event, data)
         
-        # Проверяем, является ли пользователь админом
-        if await is_user_admin(user.id): 
+        if await is_user_admin(user.id):
             return await handler(event, data)
         
-        # Проверяем, забанен ли пользователь
         try:
             res = supabase.table("banned_users")\
                 .select("user_id, reason")\
                 .eq("user_id", user.id)\
                 .execute()
             
-            # Если пользователь найден в таблице banned_users
             if res.data:
-                # Показываем сообщение о бане, если это Message
                 if isinstance(event, Message):
                     await event.answer(
                         f"🚫 Вы заблокированы!\n"
@@ -130,55 +102,53 @@ class AccessMiddleware(BaseMiddleware):
                         f"Для разблокировки обратитесь к администратору.",
                         parse_mode="HTML"
                     )
-                # Или просто отвечаем на CallbackQuery
                 elif isinstance(event, CallbackQuery):
                     await event.answer(
                         "🚫 Вы заблокированы!",
                         show_alert=True
                     )
-                return  # Блокируем выполнение handler
+                return
         
         except Exception as e:
             logging.error(f"Ошибка проверки бана: {e}")
         
-        # Если пользователь не забанен, пропускаем
         return await handler(event, data)
 
 # --- КЛАВИАТУРЫ ---
 def main_kb():
-    """Основная клавиатура с категориями и поиском"""
     buttons = [
         [KeyboardButton(text=v) for v in list(CATEGORIES.values())[:2]],
         [KeyboardButton(text=v) for v in list(CATEGORIES.values())[2:5]],
         [
             KeyboardButton(text="🔍 Поиск проекта"),
-            KeyboardButton(text="⭐ Топ недели")
+            KeyboardButton(text="⭐ Топ недели"),
+            KeyboardButton(text="📊 Топ месяца")
+        ],
+        [
+            KeyboardButton(text="👥 Реферальная система"),
+            KeyboardButton(text="📈 Мой прогресс")
         ]
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 def cancel_kb():
-    """Клавиатура для отмены действия"""
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="❌ Отмена")]],
         resize_keyboard=True
     )
 
 def back_to_menu_kb():
-    """Клавиатура для возврата в меню"""
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="⬅️ Назад в меню")]],
         resize_keyboard=True
     )
 
 def project_card_kb(p_id):
-    """Чистая карточка проекта"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔘 Открыть панель", callback_data=f"panel_{p_id}")]
     ])
 
 def project_panel_kb(p_id, has_review=False):
-    """Полная панель действий"""
     buttons = [
         [
             InlineKeyboardButton(text="⭐ Оценить", callback_data=f"rev_{p_id}"),
@@ -198,13 +168,11 @@ def project_panel_kb(p_id, has_review=False):
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def back_to_panel_kb(p_id):
-    """Кнопка назад к панели"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад к панели", callback_data=f"panel_{p_id}")]
     ])
 
 def rating_kb():
-    """Клавиатура для выбора оценки"""
     buttons = [
         [InlineKeyboardButton(text="⭐" * i, callback_data=f"st_{i}")] for i in range(5, 0, -1)
     ]
@@ -212,54 +180,326 @@ def rating_kb():
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def pagination_kb(category_key, offset, has_next=True):
-    """Клавиатура пагинации для кнопки 'Показать еще'"""
     buttons = []
     if has_next:
         callback_data = f"more_{category_key}_{offset}"
         buttons.append([InlineKeyboardButton(text="📜 Показать еще", callback_data=callback_data)])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+def referral_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔗 Получить реф. ссылку", callback_data="get_referral")],
+        [InlineKeyboardButton(text="📋 Ввести реф. код", callback_data="enter_referral")],
+        [InlineKeyboardButton(text="📊 Мои рефералы", callback_data="my_referrals")]
+    ])
+
 # --- ФУНКЦИЯ ОТПРАВКИ ЛОГОВ ---
 async def send_log_to_topics(admin_text: str, category: str = None):
-    """Отправляет лог во все нужные топики"""
     try:
-        # 1. Шлем в общий топик логов
         if TOPIC_LOGS_ALL:
             await bot.send_message(
-                ADMIN_GROUP_ID, 
-                admin_text, 
-                message_thread_id=TOPIC_LOGS_ALL, 
+                ADMIN_GROUP_ID,
+                admin_text,
+                message_thread_id=TOPIC_LOGS_ALL,
                 parse_mode="HTML"
             )
-            logging.info(f"Лог отправлен в общий топик {TOPIC_LOGS_ALL}")
         
-        # 2. Шлем в топик конкретной категории
         if category:
             cat_topic = TOPICS_BY_CATEGORY.get(category)
             if cat_topic:
                 await bot.send_message(
-                    ADMIN_GROUP_ID, 
-                    admin_text, 
-                    message_thread_id=cat_topic, 
+                    ADMIN_GROUP_ID,
+                    admin_text,
+                    message_thread_id=cat_topic,
                     parse_mode="HTML"
                 )
-                logging.info(f"Лог отправлен в топик категории {category}: {cat_topic}")
         
-        # 3. Если общий топик не указан, отправляем в основной чат
         elif not TOPIC_LOGS_ALL and ADMIN_GROUP_ID:
             await bot.send_message(ADMIN_GROUP_ID, admin_text, parse_mode="HTML")
-            logging.info("Лог отправлен в основной админ-чат")
             
     except Exception as e:
         logging.error(f"Ошибка отправки лога: {e}")
 
+# --- РЕФЕРАЛЬНАЯ СИСТЕМА ---
+async def generate_referral_code(user_id: int) -> str:
+    """Генерация уникального реферального кода"""
+    code = str(uuid.uuid4())[:8].upper()
+    
+    # Проверяем уникальность
+    result = supabase.table("referrals")\
+        .select("code")\
+        .eq("code", code)\
+        .execute()
+    
+    if not result.data:
+        # Сохраняем код
+        supabase.table("referrals").insert({
+            "user_id": user_id,
+            "code": code,
+            "created_at": "now()"
+        }).execute()
+        return code
+    else:
+        # Если код существует, генерируем новый
+        return await generate_referral_code(user_id)
+
+async def get_user_referral_code(user_id: int) -> str:
+    """Получить реферальный код пользователя"""
+    result = supabase.table("referrals")\
+        .select("code")\
+        .eq("user_id", user_id)\
+        .execute()
+    
+    if result.data:
+        return result.data[0]['code']
+    else:
+        return await generate_referral_code(user_id)
+
+async def process_referral(inviter_id: int, referred_id: int, referral_code: str):
+    """Обработка реферала"""
+    try:
+        # Проверяем, не активировал ли уже пользователь реферал
+        existing = supabase.table("referral_logs")\
+            .select("*")\
+            .eq("referred_user_id", referred_id)\
+            .execute()
+        
+        if existing.data:
+            return False, "Вы уже активировали реферальный код ранее"
+        
+        # Проверяем, не является ли пользователь самим собой
+        if inviter_id == referred_id:
+            return False, "Нельзя использовать собственный реферальный код"
+        
+        # Находим пользователя по коду
+        code_result = supabase.table("referrals")\
+            .select("user_id")\
+            .eq("code", referral_code)\
+            .execute()
+        
+        if not code_result.data:
+            return False, "Неверный реферальный код"
+        
+        inviter_id_from_code = code_result.data[0]['user_id']
+        
+        # Логируем активацию
+        supabase.table("referral_logs").insert({
+            "inviter_id": inviter_id_from_code,
+            "referred_user_id": referred_id,
+            "referral_code": referral_code,
+            "activated_at": "now()"
+        }).execute()
+        
+        # Обновляем статистику пригласившего
+        inviter_stats = supabase.table("user_stats")\
+            .select("*")\
+            .eq("user_id", inviter_id_from_code)\
+            .execute()
+        
+        if inviter_stats.data:
+            # Увеличиваем счетчик рефералов
+            supabase.table("user_stats")\
+                .update({"referral_count": inviter_stats.data[0]['referral_count'] + 1})\
+                .eq("user_id", inviter_id_from_code)\
+                .execute()
+        else:
+            # Создаем запись статистики
+            supabase.table("user_stats").insert({
+                "user_id": inviter_id_from_code,
+                "referral_count": 1,
+                "reviews_count": 0,
+                "likes_count": 0
+            }).execute()
+        
+        # Создаем запись для приглашенного
+        referred_stats = supabase.table("user_stats")\
+            .select("*")\
+            .eq("user_id", referred_id)\
+            .execute()
+        
+        if not referred_stats.data:
+            supabase.table("user_stats").insert({
+                "user_id": referred_id,
+                "referral_count": 0,
+                "reviews_count": 0,
+                "likes_count": 0
+            }).execute()
+        
+        # Отправляем уведомление в логи
+        inviter_info = await bot.get_chat(inviter_id_from_code)
+        referred_info = await bot.get_chat(referred_id)
+        
+        log_text = (
+            f"👥 <b>НОВЫЙ РЕФЕРАЛ!</b>\n\n"
+            f"👤 Пригласил: @{inviter_info.username or inviter_info.id} (ID: {inviter_id_from_code})\n"
+            f"👤 Приглашенный: @{referred_info.username or referred_info.id} (ID: {referred_id})\n"
+            f"🔗 Код: <code>{referral_code}</code>\n"
+            f"📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        )
+        
+        await send_log_to_topics(log_text)
+        
+        return True, "Реферальный код успешно активирован!"
+        
+    except Exception as e:
+        logging.error(f"Ошибка обработки реферала: {e}")
+        return False, "Ошибка при активации кода"
+
+async def get_user_stats(user_id: int):
+    """Получить статистику пользователя"""
+    result = supabase.table("user_stats")\
+        .select("*")\
+        .eq("user_id", user_id)\
+        .execute()
+    
+    if result.data:
+        return result.data[0]
+    else:
+        # Создаем пустую статистику
+        supabase.table("user_stats").insert({
+            "user_id": user_id,
+            "referral_count": 0,
+            "reviews_count": 0,
+            "likes_count": 0
+        }).execute()
+        return {"user_id": user_id, "referral_count": 0, "reviews_count": 0, "likes_count": 0}
+
+async def update_user_stats(user_id: int, field: str):
+    """Обновить статистику пользователя"""
+    stats = await get_user_stats(user_id)
+    current_value = stats.get(field, 0)
+    
+    supabase.table("user_stats")\
+        .update({field: current_value + 1})\
+        .eq("user_id", user_id)\
+        .execute()
+
+# --- СИСТЕМА НЕДЕЛЬНОГО РЕЙТИНГА ---
+async def get_weekly_top(limit: int = 10):
+    """Получить топ проектов за неделю"""
+    try:
+        week_ago = (datetime.now() - timedelta(days=7)).isoformat()
+        
+        result = supabase.table("rating_history")\
+            .select("project_id, SUM(change_amount) as total_change")\
+            .gte("created_at", week_ago)\
+            .group("project_id")\
+            .order("total_change", desc=True)\
+            .limit(limit)\
+            .execute()
+        
+        top_projects = []
+        for item in result.data:
+            project_result = supabase.table("projects")\
+                .select("*")\
+                .eq("id", item['project_id'])\
+                .execute()
+            
+            if project_result.data:
+                project = project_result.data[0]
+                project['weekly_change'] = item['total_change']
+                top_projects.append(project)
+        
+        return top_projects
+        
+    except Exception as e:
+        logging.error(f"Ошибка получения топа недели: {e}")
+        return []
+
+# --- СИСТЕМА МЕСЯЧНОГО РЕЙТИНГА ---
+async def get_monthly_top(limit: int = 10):
+    """Получить топ проектов за месяц"""
+    try:
+        month_ago = (datetime.now() - timedelta(days=30)).isoformat()
+        
+        result = supabase.table("rating_history")\
+            .select("project_id, SUM(change_amount) as total_change")\
+            .gte("created_at", month_ago)\
+            .group("project_id")\
+            .order("total_change", desc=True)\
+            .limit(limit)\
+            .execute()
+        
+        top_projects = []
+        for item in result.data:
+            project_result = supabase.table("projects")\
+                .select("*")\
+                .eq("id", item['project_id'])\
+                .execute()
+            
+            if project_result.data:
+                project = project_result.data[0]
+                project['monthly_change'] = item['total_change']
+                top_projects.append(project)
+        
+        return top_projects
+        
+    except Exception as e:
+        logging.error(f"Ошибка получения топа месяца: {e}")
+        return []
+
+async def get_weekly_leaders(limit: int = 10):
+    """Получить лидеров недели (пользователей)"""
+    try:
+        week_ago = (datetime.now() - timedelta(days=7)).isoformat()
+        
+        # Получаем активность пользователей за неделю
+        result = supabase.table("rating_history")\
+            .select("user_id, username, SUM(change_amount) as total_impact")\
+            .gte("created_at", week_ago)\
+            .not_.is_("user_id", None)\
+            .group("user_id, username")\
+            .order("total_impact", desc=True)\
+            .limit(limit)\
+            .execute()
+        
+        leaders = []
+        for item in result.data:
+            leaders.append({
+                "user_id": item['user_id'],
+                "username": item['username'],
+                "impact": item['total_impact'] or 0
+            })
+        
+        return leaders
+        
+    except Exception as e:
+        logging.error(f"Ошибка получения лидеров недели: {e}")
+        return []
+
+async def get_monthly_leaders(limit: int = 10):
+    """Получить лидеров месяца (пользователей)"""
+    try:
+        month_ago = (datetime.now() - timedelta(days=30)).isoformat()
+        
+        result = supabase.table("rating_history")\
+            .select("user_id, username, SUM(change_amount) as total_impact")\
+            .gte("created_at", month_ago)\
+            .not_.is_("user_id", None)\
+            .group("user_id, username")\
+            .order("total_impact", desc=True)\
+            .limit(limit)\
+            .execute()
+        
+        leaders = []
+        for item in result.data:
+            leaders.append({
+                "user_id": item['user_id'],
+                "username": item['username'],
+                "impact": item['total_impact'] or 0
+            })
+        
+        return leaders
+        
+    except Exception as e:
+        logging.error(f"Ошибка получения лидеров месяца: {e}")
+        return []
+
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 async def safe_edit_message(call: CallbackQuery, text: str, reply_markup=None, parse_mode="HTML"):
-    """Безопасное редактирование сообщения"""
     try:
         await call.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception as e:
-        # Если ошибка "message is not modified", просто отвечаем
         if "message is not modified" in str(e):
             await call.answer()
         else:
@@ -271,7 +511,6 @@ async def safe_edit_message(call: CallbackQuery, text: str, reply_markup=None, p
                 await call.answer()
 
 async def safe_edit_media(call: CallbackQuery, caption: str, reply_markup=None, parse_mode="HTML"):
-    """Безопасное редактирование сообщения с медиа"""
     try:
         await call.message.edit_caption(caption=caption, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception as e:
@@ -286,18 +525,15 @@ async def safe_edit_media(call: CallbackQuery, caption: str, reply_markup=None, 
                 await call.answer()
 
 async def get_project_photo(project_id: int):
-    """Получает фото проекта из базы"""
     try:
         result = supabase.table("project_photos").select("*").eq("project_id", project_id).execute()
         if result.data:
-            # Возвращаем file_id фото
             return result.data[0].get('photo_file_id', '')
     except Exception as e:
         logging.error(f"Ошибка получения фото: {e}")
     return None
 
 async def save_project_photo(project_id: int, photo_file_id: str, admin_id: int):
-    """Сохраняет фото проекта в базу"""
     try:
         supabase.table("project_photos").upsert({
             "project_id": project_id,
@@ -311,17 +547,15 @@ async def save_project_photo(project_id: int, photo_file_id: str, admin_id: int)
         return False
 
 async def find_project_by_name(name: str):
-    """Находит проект по названию"""
     try:
         result = supabase.table("projects").select("*").ilike("name", f"%{name}%").execute()
         if result.data:
-            return result.data[0]  # Возвращаем первый найденный проект
+            return result.data[0]
     except Exception as e:
         logging.error(f"Ошибка поиска проекта: {e}")
     return None
 
 async def find_project_by_id(project_id: int):
-    """Находит проект по ID"""
     try:
         result = supabase.table("projects").select("*").eq("id", project_id).execute()
         if result.data:
@@ -330,38 +564,9 @@ async def find_project_by_id(project_id: int):
         logging.error(f"Ошибка поиска проекта по ID: {e}")
     return None
 
-async def get_weekly_top():
-    """Получает топ проектов за неделю (по изменению рейтинга за 7 дней)"""
-    try:
-        week_ago = (datetime.now() - timedelta(days=7)).isoformat()
-        
-        # Получаем проекты с наибольшим изменением рейтинга за неделю
-        result = supabase.table("rating_history")\
-            .select("project_id, SUM(change_amount) as total_change")\
-            .gte("created_at", week_ago)\
-            .group("project_id")\
-            .order("total_change", desc=True)\
-            .limit(10)\
-            .execute()
-        
-        top_projects = []
-        for item in result.data:
-            project = await find_project_by_id(item['project_id'])
-            if project:
-                project['weekly_change'] = item['total_change']
-                top_projects.append(project)
-        
-        return top_projects
-        
-    except Exception as e:
-        logging.error(f"Ошибка получения топа недели: {e}")
-        return []
-
 async def show_projects_batch(category_key, offset, message_or_call, is_first_batch=False):
-    """Показывает партию проектов (по 5 штук)"""
     projects_per_batch = 5
     
-    # Получаем проекты для категории
     data = supabase.table("projects")\
         .select("*")\
         .eq("category", category_key)\
@@ -369,7 +574,6 @@ async def show_projects_batch(category_key, offset, message_or_call, is_first_ba
         .range(offset, offset + projects_per_batch - 1)\
         .execute().data
     
-    # Считаем общее количество проектов
     count_result = supabase.table("projects")\
         .select("*", count="exact")\
         .eq("category", category_key)\
@@ -377,7 +581,7 @@ async def show_projects_batch(category_key, offset, message_or_call, is_first_ba
     
     total_projects = count_result.count if hasattr(count_result, 'count') else 0
     
-    if not data: 
+    if not data:
         if is_first_batch:
             category_name = CATEGORIES[category_key]
             text = f"📭 В разделе <b>'{escape(category_name)}'</b> пока нет проектов."
@@ -391,7 +595,6 @@ async def show_projects_batch(category_key, offset, message_or_call, is_first_ba
                 await message_or_call.answer("Больше проектов нет", show_alert=True)
         return
     
-    # Если это первый батч, отправляем новое сообщение
     if is_first_batch:
         category_name = CATEGORIES[category_key]
         text = f"<b>{escape(category_name)}</b>\n"
@@ -403,20 +606,16 @@ async def show_projects_batch(category_key, offset, message_or_call, is_first_ba
             await message_or_call.answer(text, parse_mode="HTML")
     
     for p in data:
-        # Получаем фото проекта
         photo_file_id = await get_project_photo(p['id'])
         
-        # Экранируем данные
         project_name_escaped = escape(str(p['name']))
         description_escaped = escape(str(p['description']))
         
-        # Красивая карточка проекта как было раньше
         card = f"<b>{project_name_escaped}</b>\n\n{description_escaped[:150]}{'...' if len(p['description']) > 150 else ''}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
         card += f"📊 Текущий рейтинг: <b>{p['score']}</b>\n\n"
         card += f"<i>Нажмите кнопку ниже для управления проектом</i>"
         
         if isinstance(message_or_call, CallbackQuery):
-            # Для CallbackQuery отправляем новое сообщение
             if photo_file_id:
                 try:
                     await message_or_call.message.answer_photo(
@@ -430,7 +629,6 @@ async def show_projects_batch(category_key, offset, message_or_call, is_first_ba
             else:
                 await message_or_call.message.answer(card, reply_markup=project_card_kb(p['id']), parse_mode="HTML")
         else:
-            # Для Message отправляем новое сообщение
             if photo_file_id:
                 try:
                     await message_or_call.answer_photo(
@@ -444,10 +642,8 @@ async def show_projects_batch(category_key, offset, message_or_call, is_first_ba
             else:
                 await message_or_call.answer(card, reply_markup=project_card_kb(p['id']), parse_mode="HTML")
     
-    # Проверяем, есть ли еще проекты
     has_next = offset + projects_per_batch < total_projects
     
-    # Если это первый батч и есть еще проекты, добавляем кнопку "Показать еще"
     if is_first_batch and has_next:
         kb = pagination_kb(category_key, offset + projects_per_batch, has_next)
         if isinstance(message_or_call, CallbackQuery):
@@ -459,11 +655,9 @@ async def show_projects_batch(category_key, offset, message_or_call, is_first_ba
                 offset + 1, min(offset + projects_per_batch, total_projects), total_projects
             ), reply_markup=kb, parse_mode="HTML")
     elif isinstance(message_or_call, CallbackQuery) and not is_first_batch:
-        # Обновляем сообщение с пагинацией
         new_offset = offset + projects_per_batch
         new_has_next = new_offset < total_projects
         
-        # Удаляем старое сообщение с пагинацией и создаем новое
         try:
             await message_or_call.message.delete()
         except:
@@ -475,13 +669,671 @@ async def show_projects_batch(category_key, offset, message_or_call, is_first_ba
                 offset + projects_per_batch + 1, min(new_offset + projects_per_batch, total_projects), total_projects
             ), reply_markup=kb, parse_mode="HTML")
         else:
-            # Если проектов больше нет, отправляем финальное сообщение
             await message_or_call.message.answer("✅ <b>Показаны все проекты</b>\nВсего проектов: <code>{}</code>".format(total_projects), parse_mode="HTML")
+
+# --- НОВЫЕ КОМАНДЫ: ТОП НЕДЕЛИ И МЕСЯЦА ---
+@router.message(F.text == "⭐ Топ недели")
+async def weekly_top_command(message: Message):
+    """Показать топ проектов недели"""
+    top_projects = await get_weekly_top(10)
+    
+    if not top_projects:
+        await message.answer(
+            "📊 <b>ТОП НЕДЕЛИ (ПРОЕКТЫ)</b>\n\n"
+            "Пока недостаточно данных для формирования топа.\n"
+            "Начните оценивать проекты, и скоро здесь появятся лидеры!",
+            parse_mode="HTML"
+        )
+        return
+    
+    text = f"<b>⭐ ТОП ПРОЕКТОВ НЕДЕЛИ</b>\n\n"
+    text += f"📅 Период: последние 7 дней\n"
+    text += f"📊 Рейтинг основан на изменении баллов за неделю\n"
+    text += f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n"
+    
+    for i, project in enumerate(top_projects, 1):
+        change = project.get('weekly_change', 0)
+        change_symbol = "📈" if change > 0 else "📉" if change < 0 else "➡️"
+        
+        project_name_escaped = escape(str(project['name']))
+        category_escaped = escape(str(CATEGORIES.get(project['category'], project['category'])))
+        
+        text += f"<b>{i}. {project_name_escaped}</b>\n"
+        text += f"📂 Категория: {category_escaped}\n"
+        text += f"🔢 Текущий рейтинг: <b>{project['score']}</b>\n"
+        text += f"{change_symbol} Изменение за неделю: <code>{change:+d}</code>\n"
+        text += f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+    
+    # Добавляем лидеров недели (пользователей)
+    user_leaders = await get_weekly_leaders(5)
+    if user_leaders:
+        text += f"\n<b>🏆 ЛИДЕРЫ НЕДЕЛИ (ПОЛЬЗОВАТЕЛИ):</b>\n"
+        for i, leader in enumerate(user_leaders, 1):
+            username = escape(str(leader.get('username', 'Аноним')))
+            impact = leader.get('impact', 0)
+            text += f"{i}. @{username} — <code>{impact:+d}</code> баллов влияния\n"
+    
+    text += f"\n<i>Топ обновляется автоматически каждую неделю</i>"
+    
+    await message.answer(text, parse_mode="HTML")
+
+@router.message(F.text == "📊 Топ месяца")
+async def monthly_top_command(message: Message):
+    """Показать топ проектов месяца"""
+    top_projects = await get_monthly_top(10)
+    
+    if not top_projects:
+        await message.answer(
+            "📊 <b>ТОП МЕСЯЦА (ПРОЕКТЫ)</b>\n\n"
+            "Пока недостаточно данных для формирования топа.\n"
+            "Начните оценивать проекты, и скоро здесь появятся лидеры!",
+            parse_mode="HTML"
+        )
+        return
+    
+    text = f"<b>📊 ТОП ПРОЕКТОВ МЕСЯЦА</b>\n\n"
+    text += f"📅 Период: последние 30 дней\n"
+    text += f"📊 Рейтинг основан на изменении баллов за месяц\n"
+    text += f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n"
+    
+    for i, project in enumerate(top_projects, 1):
+        change = project.get('monthly_change', 0)
+        change_symbol = "📈" if change > 0 else "📉" if change < 0 else "➡️"
+        
+        project_name_escaped = escape(str(project['name']))
+        category_escaped = escape(str(CATEGORIES.get(project['category'], project['category'])))
+        
+        text += f"<b>{i}. {project_name_escaped}</b>\n"
+        text += f"📂 Категория: {category_escaped}\n"
+        text += f"🔢 Текущий рейтинг: <b>{project['score']}</b>\n"
+        text += f"{change_symbol} Изменение за месяц: <code>{change:+d}</code>\n"
+        text += f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+    
+    # Добавляем лидеров месяца (пользователей)
+    user_leaders = await get_monthly_leaders(5)
+    if user_leaders:
+        text += f"\n<b>🏆 ЛИДЕРЫ МЕСЯЦА (ПОЛЬЗОВАТЕЛИ):</b>\n"
+        for i, leader in enumerate(user_leaders, 1):
+            username = escape(str(leader.get('username', 'Аноним')))
+            impact = leader.get('impact', 0)
+            text += f"{i}. @{username} — <code>{impact:+d}</code> баллов влияния\n"
+    
+    text += f"\n<i>Топ обновляется автоматически каждый месяц</i>"
+    
+    await message.answer(text, parse_mode="HTML")
+
+# --- РЕФЕРАЛЬНАЯ СИСТЕМА - КОМАНДЫ ---
+@router.message(F.text == "👥 Реферальная система")
+async def referral_system_menu(message: Message):
+    """Меню реферальной системы"""
+    text = (
+        "<b>👥 РЕФЕРАЛЬНАЯ СИСТЕМА</b>\n\n"
+        "Приглашайте друзей и получайте бонусы!\n\n"
+        "✨ <b>Как это работает:</b>\n"
+        "1. Получите свою реферальную ссылку\n"
+        "2. Отправьте ее друзьям\n"
+        "3. Когда друг активирует ваш код, вы получите уведомление\n"
+        "4. Следите за своим рейтингом в таблице лидеров\n\n"
+        "🎁 <b>Преимущества:</b>\n"
+        "• Ваше имя в таблице лидеров\n"
+        "• Уведомление о каждом приглашенном друге\n"
+        "• Дополнительный статус в сообществе"
+    )
+    
+    await message.answer(text, reply_markup=referral_kb(), parse_mode="HTML")
+
+@router.callback_query(F.data == "get_referral")
+async def get_referral_link(call: CallbackQuery):
+    """Получить реферальную ссылку"""
+    user_id = call.from_user.id
+    code = await get_user_referral_code(user_id)
+    
+    referral_link = f"https://t.me/{(await bot.me()).username}?start=ref_{code}"
+    
+    text = (
+        f"<b>🔗 ВАША РЕФЕРАЛЬНАЯ ССЫЛКА</b>\n\n"
+        f"📋 <b>Код:</b> <code>{code}</code>\n"
+        f"🔗 <b>Ссылка:</b> {referral_link}\n\n"
+        f"<i>Отправьте эту ссылку другу. Когда он перейдет по ней и начнет использовать бота, вы получите уведомление!</i>\n\n"
+        f"📊 <b>Статистика:</b>\n"
+    )
+    
+    stats = await get_user_stats(user_id)
+    text += f"• Приглашено друзей: <b>{stats['referral_count']}</b>\n"
+    
+    # Получаем список рефералов
+    referrals_result = supabase.table("referral_logs")\
+        .select("referred_user_id, activated_at")\
+        .eq("inviter_id", user_id)\
+        .order("activated_at", desc=True)\
+        .execute()
+    
+    if referrals_result.data:
+        text += f"\n<b>📋 ПОСЛЕДНИЕ РЕФЕРАЛЫ:</b>\n"
+        for i, ref in enumerate(referrals_result.data[:5], 1):
+            date = ref['activated_at'][:10] if ref['activated_at'] else "Неизвестно"
+            text += f"{i}. ID: <code>{ref['referred_user_id']}</code> — {date}\n"
+    
+    await safe_edit_message(call, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Ввести реф. код", callback_data="enter_referral")],
+        [InlineKeyboardButton(text="📊 Мои рефералы", callback_data="my_referrals")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_referral_menu")]
+    ]))
+    
+    await call.answer()
+
+@router.callback_query(F.data == "enter_referral")
+async def enter_referral_code(call: CallbackQuery, state: FSMContext):
+    """Ввод реферального кода"""
+    await state.set_state(ReferralState.waiting_for_referral_code)
+    
+    text = (
+        "<b>📋 ВВОД РЕФЕРАЛЬНОГО КОДА</b>\n\n"
+        "Введите реферальный код, который вам дал друг:\n\n"
+        "<i>Код должен состоять из 8 символов (буквы и цифры)</i>"
+    )
+    
+    await safe_edit_message(call, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_referral_menu")]
+    ]))
+    
+    await call.answer()
+
+@router.message(ReferralState.waiting_for_referral_code)
+async def process_referral_code(message: Message, state: FSMContext):
+    """Обработка введенного реферального кода"""
+    referral_code = message.text.strip().upper()
+    
+    if len(referral_code) != 8:
+        await message.answer(
+            "❌ <b>Неверный формат кода!</b>\n\n"
+            "Реферальный код должен состоять из 8 символов.\n"
+            "Попробуйте еще раз или нажмите 'Отмена'.",
+            parse_mode="HTML"
+        )
+        return
+    
+    success, result_message = await process_referral(
+        inviter_id=0,  # Будет найден по коду
+        referred_id=message.from_user.id,
+        referral_code=referral_code
+    )
+    
+    if success:
+        await message.answer(
+            f"✅ <b>{result_message}</b>\n\n"
+            f"Теперь вы в реферальной сети!\n"
+            f"Вы также можете приглашать друзей и получать уведомления.",
+            parse_mode="HTML",
+            reply_markup=main_kb()
+        )
+    else:
+        await message.answer(
+            f"❌ <b>{result_message}</b>\n\n"
+            f"Попробуйте другой код или обратитесь к тому, кто дал вам этот код.",
+            parse_mode="HTML",
+            reply_markup=main_kb()
+        )
+    
+    await state.clear()
+
+@router.callback_query(F.data == "my_referrals")
+async def show_my_referrals(call: CallbackQuery):
+    """Показать моих рефералов"""
+    user_id = call.from_user.id
+    
+    referrals_result = supabase.table("referral_logs")\
+        .select("referred_user_id, activated_at")\
+        .eq("inviter_id", user_id)\
+        .order("activated_at", desc=True)\
+        .execute()
+    
+    stats = await get_user_stats(user_id)
+    
+    text = f"<b>📊 МОИ РЕФЕРАЛЫ</b>\n\n"
+    text += f"👥 Всего приглашено: <b>{stats['referral_count']}</b>\n"
+    text += f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n"
+    
+    if referrals_result.data:
+        text += f"<b>📋 СПИСОК РЕФЕРАЛОВ:</b>\n"
+        for i, ref in enumerate(referrals_result.data, 1):
+            date = ref['activated_at'][:10] if ref['activated_at'] else "Неизвестно"
+            text += f"{i}. ID: <code>{ref['referred_user_id']}</code> — {date}\n"
+        
+        if len(referrals_result.data) > 10:
+            text += f"\n<i>Показано {len(referrals_result.data)} из {stats['referral_count']} рефералов</i>"
+    else:
+        text += "📭 У вас еще нет рефералов.\n"
+        text += "Пригласите друзей, чтобы они появились здесь!"
+    
+    await safe_edit_message(call, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔗 Получить реф. ссылку", callback_data="get_referral")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_referral_menu")]
+    ]))
+    
+    await call.answer()
+
+@router.callback_query(F.data == "back_to_referral_menu")
+async def back_to_referral_menu(call: CallbackQuery):
+    """Возврат в меню реферальной системы"""
+    text = (
+        "<b>👥 РЕФЕРАЛЬНАЯ СИСТЕМА</b>\n\n"
+        "Приглашайте друзей и получайте бонусы!\n\n"
+        "✨ <b>Как это работает:</b>\n"
+        "1. Получите свою реферальную ссылку\n"
+        "2. Отправьте ее друзьям\n"
+        "3. Когда друг активирует ваш код, вы получите уведомление\n"
+        "4. Следите за своим рейтингом в таблице лидеров"
+    )
+    
+    await safe_edit_message(call, text, reply_markup=referral_kb())
+    await call.answer()
+
+@router.message(F.text == "📈 Мой прогресс")
+async def my_progress(message: Message):
+    """Показать прогресс пользователя"""
+    user_id = message.from_user.id
+    stats = await get_user_stats(user_id)
+    
+    # Получаем активность пользователя
+    user_activity = supabase.table("rating_history")\
+        .select("change_amount, created_at, reason")\
+        .eq("user_id", user_id)\
+        .order("created_at", desc=True)\
+        .limit(10)\
+        .execute()
+    
+    # Получаем место в недельном рейтинге
+    weekly_leaders = await get_weekly_leaders(100)
+    weekly_position = None
+    weekly_impact = 0
+    
+    for i, leader in enumerate(weekly_leaders, 1):
+        if leader['user_id'] == user_id:
+            weekly_position = i
+            weekly_impact = leader.get('impact', 0)
+            break
+    
+    # Получаем место в месячном рейтинге
+    monthly_leaders = await get_monthly_leaders(100)
+    monthly_position = None
+    monthly_impact = 0
+    
+    for i, leader in enumerate(monthly_leaders, 1):
+        if leader['user_id'] == user_id:
+            monthly_position = i
+            monthly_impact = leader.get('impact', 0)
+            break
+    
+    text = f"<b>📈 ВАШ ПРОГРЕСС</b>\n\n"
+    text += f"👤 ID: <code>{user_id}</code>\n"
+    text += f"📛 Имя: {message.from_user.first_name or ''} {message.from_user.last_name or ''}\n"
+    text += f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n"
+    
+    text += f"<b>📊 ОБЩАЯ СТАТИСТИКА:</b>\n"
+    text += f"• 👥 Приглашено друзей: <b>{stats['referral_count']}</b>\n"
+    text += f"• 💬 Оставлено отзывов: <b>{stats.get('reviews_count', 0)}</b>\n"
+    text += f"• ❤️ Поставлено лайков: <b>{stats.get('likes_count', 0)}</b>\n\n"
+    
+    if weekly_position:
+        text += f"<b>⭐ НЕДЕЛЬНЫЙ РЕЙТИНГ:</b>\n"
+        text += f"• 🏆 Место: <b>{weekly_position}</b>\n"
+        text += f"• 📈 Влияние: <code>{weekly_impact:+d}</code> баллов\n\n"
+    else:
+        text += f"<b>⭐ НЕДЕЛЬНЫЙ РЕЙТИНГ:</b>\n"
+        text += f"• 📊 Вы еще не в рейтинге этой недели\n\n"
+    
+    if monthly_position:
+        text += f"<b>📊 МЕСЯЧНЫЙ РЕЙТИНГ:</b>\n"
+        text += f"• 🏆 Место: <b>{monthly_position}</b>\n"
+        text += f"• 📈 Влияние: <code>{monthly_impact:+d}</code> баллов\n\n"
+    else:
+        text += f"<b>📊 МЕСЯЧНЫЙ РЕЙТИНГ:</b>\n"
+        text += f"• 📊 Вы еще не в рейтинге этого месяца\n\n"
+    
+    if user_activity.data:
+        text += f"<b>📝 ПОСЛЕДНИЕ ДЕЙСТВИЯ:</b>\n"
+        for i, activity in enumerate(user_activity.data[:5], 1):
+            date = activity['created_at'][:10] if activity['created_at'] else ""
+            reason = escape(str(activity['reason']))
+            change = activity['change_amount']
+            symbol = "📈" if change > 0 else "📉" if change < 0 else "➡️"
+            
+            text += f"{i}. {symbol} <code>{change:+d}</code> — {reason[:30]}... ({date})\n"
+    
+    text += f"\n<i>Продолжайте участвовать в жизни сообщества!</i>"
+    
+    await message.answer(text, parse_mode="HTML")
+
+# --- ОБНОВЛЕННЫЙ START ДЛЯ РЕФЕРАЛЬНОЙ СИСТЕМЫ ---
+@router.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
+    
+    # Проверяем бан
+    ban_result = supabase.table("banned_users") \
+        .select("*") \
+        .eq("user_id", message.from_user.id) \
+        .execute()
+    
+    if ban_result.data:
+        reason_escaped = escape(str(ban_result.data[0].get('reason', 'Не указана')))
+        await message.answer(
+            f"🚫 <b>Вы заблокированы!</b>\n\n"
+            f"📝 Причина: <i>{reason_escaped}</i>\n"
+            f"📅 Дата блокировки: {ban_result.data[0].get('banned_at', 'Неизвестно')[:10]}\n\n"
+            f"Для разблокировки обратитесь к администратору.",
+            parse_mode="HTML"
+        )
+        return
+    
+    # Проверяем реферальный код в команде
+    referral_code = None
+    if len(message.text.split()) > 1:
+        arg = message.text.split()[1]
+        if arg.startswith("ref_"):
+            referral_code = arg[4:]  # Убираем "ref_"
+    
+    # Обработка реферального кода
+    if referral_code and len(referral_code) == 8:
+        success, result_message = await process_referral(
+            inviter_id=0,
+            referred_id=message.from_user.id,
+            referral_code=referral_code.upper()
+        )
+        
+        if success:
+            await message.answer(
+                f"✅ <b>Реферальный код активирован!</b>\n\n"
+                f"{result_message}",
+                parse_mode="HTML"
+            )
+    
+    # Получаем топ проектов
+    top_projects = supabase.table("projects") \
+        .select("*") \
+        .order("score", desc=True) \
+        .limit(5) \
+        .execute().data
+
+    start_text = "<b>🌟 ДОБРО ПОЖАЛОВАТЬ В РЕЙТИНГ ПРОЕКТОВ КМБП!</b>\n\n"
+    start_text += "Здесь вы можете оценивать проекты, оставлять отзывы и следить за рейтингом лучших проектов сообщества.\n\n"
+
+    if top_projects:
+        start_text += "<b>🏆 ТОП-5 ПРОЕКТОВ:</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+        for i, p in enumerate(top_projects, 1):
+            project_name_escaped = escape(str(p['name']))
+            start_text += f"{i}. <b>{project_name_escaped}</b> — <code>{p['score']}</code>\n"
+    else:
+        start_text += "<b>🏆 ТОП-5 ПРОЕКТОВ:</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+        start_text += "Список пуст. Будьте первым, кто добавит проект!\n"
+
+    start_text += "\n<b>✨ НОВЫЕ ВОЗМОЖНОСТИ:</b>\n"
+    start_text += "• 📊 <b>Топ недели</b> - лучшие проекты за 7 дней\n"
+    start_text += "• 📈 <b>Топ месяца</b> - лидеры за 30 дней\n"
+    start_text += "• 👥 <b>Реферальная система</b> - приглашайте друзей\n"
+    start_text += "• 📈 <b>Мой прогресс</b> - следите за своей активностью\n\n"
+    
+    start_text += "<i>Нажмите на категорию ниже, чтобы увидеть все проекты</i>"
+    start_text += "\n<b><i>Партнеры KMBP Monthly Awards Season 1</i></b>"
+    start_text += "\n✴ @The_infernal_paradise_bot"
+
+    try:
+        photo = FSInputFile("start_photo.jpg")
+        await message.answer_photo(
+            photo=photo,
+            caption=start_text,
+            reply_markup=main_kb(),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        print(f"Ошибка отправки фото: {e}")
+        await message.answer(start_text, reply_markup=main_kb(), parse_mode="HTML")
+
+# --- ОБНОВЛЕННЫЕ ОБРАБОТЧИКИ ДЛЯ УЧЕТА СТАТИСТИКИ ---
+@router.callback_query(F.data.startswith("rev_"))
+async def rev_start(call: CallbackQuery, state: FSMContext):
+    p_id = call.data.split("_")[1]
+    
+    ban_result = supabase.table("banned_users")\
+        .select("*")\
+        .eq("user_id", call.from_user.id)\
+        .execute()
+    
+    if ban_result.data:
+        await call.answer("🚫 Вы заблокированы и не можете оставлять отзывы!", show_alert=True)
+        return
+    
+    check = supabase.table("user_logs").select("*").eq("user_id", call.from_user.id).eq("project_id", p_id).eq("action_type", "review").execute()
+    await state.update_data(p_id=p_id)
+    await state.set_state(ReviewState.waiting_for_text)
+    
+    project = await find_project_by_id(int(p_id))
+    project_name = project['name'] if project else "Проект"
+    
+    project_name_escaped = escape(str(project_name))
+    txt = f"📝 <b>Изменение отзыва для проекта {project_name_escaped}</b>\n\nВведите новый текст отзыва:"
+    if not check.data:
+        txt = f"💬 <b>Новый отзыв для проекта {project_name_escaped}</b>\n\nВведите текст отзыва. <b>Важно. Если вы пишите негативный отзыв, просим вас прикреплять аргументацию со ссылками на облачные хранилища, в противном случае мы будем вынуждены удалить Ваш отзыв</b>"
+    
+    if call.message.photo:
+        await safe_edit_media(call, txt, reply_markup=back_to_panel_kb(p_id))
+    else:
+        await safe_edit_message(call, txt, reply_markup=back_to_panel_kb(p_id))
+    
+    await call.answer()
+
+@router.callback_query(F.data.startswith("st_"), ReviewState.waiting_for_rate)
+async def rev_end(call: CallbackQuery, state: FSMContext):
+    rate = int(call.data.split("_")[1])
+    data = await state.get_data()
+    p_id = data['p_id']
+    
+    ban_result = supabase.table("banned_users")\
+        .select("*")\
+        .eq("user_id", call.from_user.id)\
+        .execute()
+    
+    if ban_result.data:
+        await call.answer("🚫 Вы заблокированы и не можете оставлять отзывы!", show_alert=True)
+        await state.clear()
+        return
+    
+    old_rev = supabase.table("user_logs").select("*").eq("user_id", call.from_user.id).eq("project_id", p_id).eq("action_type", "review").execute()
+    p = await find_project_by_id(int(p_id))
+    
+    if not p:
+        await call.answer("❌ Проект не найден", show_alert=True)
+        await state.clear()
+        return
+    
+    old_score = p['score']
+    rating_change = RATING_MAP[rate]
+    
+    if old_rev.data:
+        old_rating_change = RATING_MAP[old_rev.data[0]['rating_val']]
+        rating_change = RATING_MAP[rate] - old_rating_change
+        new_score = old_score + rating_change
+        supabase.table("user_logs").update({"review_text": data['txt'], "rating_val": rate}).eq("id", old_rev.data[0]['id']).execute()
+        res_txt = "обновлен"
+        log_id = old_rev.data[0]['id']
+        reason = f"Изменение отзыва: {old_rev.data[0]['rating_val']}/5 → {rate}/5"
+    else:
+        new_score = old_score + rating_change
+        log = supabase.table("user_logs").insert({
+            "user_id": call.from_user.id,
+            "project_id": p_id,
+            "action_type": "review",
+            "review_text": data['txt'],
+            "rating_val": rate
+        }).execute()
+        res_txt = "добавлен"
+        log_id = log.data[0]['id']
+        reason = f"Новый отзыв: {rate}/5"
+        
+        # Обновляем статистику пользователя
+        await update_user_stats(call.from_user.id, "reviews_count")
+
+    supabase.table("projects").update({"score": new_score}).eq("id", p_id).execute()
+    
+    supabase.table("rating_history").insert({
+        "project_id": p_id,
+        "user_id": call.from_user.id,
+        "username": call.from_user.username,
+        "change_type": "user_review",
+        "score_before": old_score,
+        "score_after": new_score,
+        "change_amount": rating_change,
+        "reason": reason,
+        "is_admin_action": False,
+        "related_review_id": log_id
+    }).execute()
+    
+    text = f"✅ <b>Отзыв успешно {res_txt}!</b>\n\n"
+    text += f"📊 Изменение рейтинга: <code>{rating_change:+d}</code>\n"
+    text += f"🔢 Новый рейтинг: <b>{new_score}</b>"
+    
+    if call.message.photo:
+        await safe_edit_media(call, text, reply_markup=back_to_panel_kb(p_id))
+    else:
+        await safe_edit_message(call, text, reply_markup=back_to_panel_kb(p_id))
+    
+    project_name_escaped = escape(str(p['name']))
+    review_text_escaped = escape(str(data['txt']))
+    
+    admin_text = (f"📢 <b>Отзыв {res_txt}:</b> {project_name_escaped}\n"
+                  f"Пользователь: @{call.from_user.username or call.from_user.id}\n"
+                  f"Текст: <i>{review_text_escaped}</i>\n"
+                  f"Оценка: {rate}/5\n"
+                  f"📊 Изменение рейтинга: {rating_change:+d}\n"
+                  f"🔢 Новый рейтинг: {new_score}\n"
+                  f"Удалить: <code>/delrev {log_id}</code>")
+    
+    await send_log_to_topics(admin_text, p['category'])
+
+    await state.clear()
+    await call.answer()
+
+@router.callback_query(F.data.startswith("like_"))
+async def handle_like(call: CallbackQuery):
+    p_id = call.data.split("_")[1]
+    
+    ban_result = supabase.table("banned_users")\
+        .select("*")\
+        .eq("user_id", call.from_user.id)\
+        .execute()
+    
+    if ban_result.data:
+        await call.answer("🚫 Вы заблокированы и не можете ставить лайки!", show_alert=True)
+        return
+    
+    check = supabase.table("user_logs").select("id").eq("user_id", call.from_user.id).eq("project_id", p_id).eq("action_type", "like").execute()
+    if check.data:
+        await call.answer("Вы уже поддержали этот проект!", show_alert=True)
+        return
+    
+    project = await find_project_by_id(int(p_id))
+    if not project:
+        await call.answer("Проект не найден.", show_alert=True)
+        return
+    
+    old_score = project['score']
+    new_score = old_score + 1
+    
+    supabase.table("projects").update({"score": new_score}).eq("id", p_id).execute()
+    
+    supabase.table("user_logs").insert({
+        "user_id": call.from_user.id,
+        "project_id": p_id,
+        "action_type": "like"
+    }).execute()
+    
+    # Обновляем статистику пользователя
+    await update_user_stats(call.from_user.id, "likes_count")
+    
+    supabase.table("rating_history").insert({
+        "project_id": p_id,
+        "user_id": call.from_user.id,
+        "username": call.from_user.username,
+        "change_type": "like",
+        "score_before": old_score,
+        "score_after": new_score,
+        "change_amount": 1,
+        "reason": "Лайк от пользователя",
+        "is_admin_action": False
+    }).execute()
+    
+    await open_panel(call)
+    await call.answer("❤️ Голос учтен!")
+
+# --- ОБНОВЛЕННЫЕ АДМИН КОМАНДЫ ДЛЯ РЕФЕРАЛОВ ---
+@router.message(Command("referralstats"))
+async def admin_referral_stats(message: Message):
+    """Статистика реферальной системы для админов"""
+    if not await is_user_admin(message.from_user.id):
+        return
+    
+    try:
+        # Общая статистика
+        total_referrals = supabase.table("referral_logs")\
+            .select("*", count="exact")\
+            .execute()
+        
+        total_users_with_ref = supabase.table("user_stats")\
+            .select("*", count="exact")\
+            .gt("referral_count", 0)\
+            .execute()
+        
+        # Топ приглашающих
+        top_inviters = supabase.table("user_stats")\
+            .select("user_id, referral_count")\
+            .order("referral_count", desc=True)\
+            .limit(10)\
+            .execute()
+        
+        # Последние рефералы
+        recent_referrals = supabase.table("referral_logs")\
+            .select("*")\
+            .order("activated_at", desc=True)\
+            .limit(5)\
+            .execute()
+        
+        text = "<b>📊 СТАТИСТИКА РЕФЕРАЛЬНОЙ СИСТЕМЫ</b>\n\n"
+        
+        total_refs = total_referrals.count if hasattr(total_referrals, 'count') else 0
+        total_with_ref = total_users_with_ref.count if hasattr(total_users_with_ref, 'count') else 0
+        
+        text += f"📈 <b>Общая статистика:</b>\n"
+        text += f"• Всего рефералов: <b>{total_refs}</b>\n"
+        text += f"• Пользователей с рефералами: <b>{total_with_ref}</b>\n"
+        text += f"• Среднее на пользователя: <b>{total_refs/max(total_with_ref, 1):.1f}</b>\n\n"
+        
+        if top_inviters.data:
+            text += f"🏆 <b>ТОП-10 ПРИГЛАШАЮЩИХ:</b>\n"
+            for i, inviter in enumerate(top_inviters.data, 1):
+                try:
+                    user_info = await bot.get_chat(inviter['user_id'])
+                    username = user_info.username or user_info.id
+                except:
+                    username = inviter['user_id']
+                
+                text += f"{i}. @{username} — <b>{inviter['referral_count']}</b> рефералов\n"
+        
+        if recent_referrals.data:
+            text += f"\n🕒 <b>ПОСЛЕДНИЕ РЕФЕРАЛЫ:</b>\n"
+            for ref in recent_referrals.data:
+                date = ref['activated_at'][:16] if ref['activated_at'] else "Неизвестно"
+                text += f"• Код: <code>{ref['referral_code']}</code> — {date}\n"
+        
+        await message.reply(text, parse_mode="HTML")
+        
+    except Exception as e:
+        logging.error(f"Ошибка в /referralstats: {e}")
+        await message.reply("❌ Ошибка при получении статистики.")
 
 # --- ОБРАБОТЧИК ПАГИНАЦИИ ---
 @router.callback_query(F.data.startswith("more_"))
 async def handle_show_more(call: CallbackQuery):
-    """Обработка кнопки 'Показать еще'"""
     try:
         callback_data = call.data
         parts = callback_data.split("_")
@@ -503,54 +1355,14 @@ async def handle_show_more(call: CallbackQuery):
         logging.error(f"Ошибка пагинации: {e}")
         await call.answer("❌ Ошибка загрузки проектов", show_alert=True)
 
-# --- НОВАЯ ФИЧА: ТОП НЕДЕЛИ ---
-@router.message(F.text == "⭐ Топ недели")
-async def weekly_top(message: Message):
-    """Показать топ проектов недели"""
-    top_projects = await get_weekly_top()
-    
-    if not top_projects:
-        await message.answer(
-            "📊 <b>ТОП НЕДЕЛИ</b>\n\n"
-            "Пока недостаточно данных для формирования топа.\n"
-            "Начните оценивать проекты, и скоро здесь появятся лидеры!",
-            parse_mode="HTML"
-        )
-        return
-    
-    text = f"<b>⭐ ТОП ПРОЕКТОВ НЕДЕЛИ</b>\n\n"
-    text += f"📅 Период: последние 7 дней\n"
-    text += f"📊 Рейтинг основан на изменении баллов за неделю\n"
-    text += f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n"
-    
-    for i, project in enumerate(top_projects[:10], 1):  # Показываем топ-10
-        change = project.get('weekly_change', 0)
-        change_symbol = "📈" if change > 0 else "📉" if change < 0 else "➡️"
-        
-        # Экранируем данные
-        project_name_escaped = escape(str(project['name']))
-        category_escaped = escape(str(CATEGORIES.get(project['category'], project['category'])))
-        
-        text += f"<b>{i}. {project_name_escaped}</b>\n"
-        text += f"📂 Категория: {category_escaped}\n"
-        text += f"🔢 Текущий рейтинг: <b>{project['score']}</b>\n"
-        text += f"{change_symbol} Изменение за неделю: <code>{change:+d}</code>\n"
-        text += f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-    
-    text += f"\n<i>Топ обновляется автоматически</i>"
-    
-    await message.answer(text, parse_mode="HTML")
-
 # --- ОБРАБОТЧИК КНОПКИ НАЗАД В МЕНЮ ---
 @router.message(F.text == "⬅️ Назад в меню")
 async def back_to_menu(message: Message, state: FSMContext):
-    """Железобетонный обработчик кнопки 'Назад в меню'"""
     await state.clear()
     await message.answer("Главное меню:", reply_markup=main_kb())
 
 @router.message(F.text == "❌ Отмена")
 async def cancel_action(message: Message, state: FSMContext):
-    """Отмена текущего действия"""
     current_state = await state.get_state()
     if current_state:
         await state.clear()
@@ -561,7 +1373,6 @@ async def cancel_action(message: Message, state: FSMContext):
 # --- ПОИСК ПРОЕКТОВ ---
 @router.message(F.text == "🔍 Поиск проекта")
 async def search_project_start(message: Message, state: FSMContext):
-    """Начать поиск проекта"""
     await state.set_state(SearchState.waiting_for_query)
     await message.answer(
         "🔍 <b>Поиск проекта</b>\n\n"
@@ -569,7 +1380,6 @@ async def search_project_start(message: Message, state: FSMContext):
         parse_mode="HTML",
         reply_markup=back_to_menu_kb()
     )
-
 @router.message(SearchState.waiting_for_query, F.text)
 async def search_project_execute(message: Message, state: FSMContext):
     """Выполнить поиск проекта"""
