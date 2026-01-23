@@ -17,14 +17,14 @@ from html import escape
 import uuid
 import threading
 
-# --- НАСТРОЙКИ ТОПИКОВ ---
-TOPIC_LOGS_ALL = 46
+# Добавь ID топика для новой категории:
 TOPICS_BY_CATEGORY = {
     "support_bots": 38,
     "support_admins": 41,
     "lot_channels": 39,
     "check_channels": 42,
-    "kmbp_channels": 40
+    "kmbp_channels": 40,
+    "roll_bots": 8375
 }
 
 # --- ИНИЦИАЛИЗАЦИЯ ---
@@ -40,12 +40,14 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
 
+# Добавь новую категорию:
 CATEGORIES = {
     "support_bots": "Боты поддержки",
     "support_admins": "Админы поддержки",
     "lot_channels": "Каналы лотов",
     "check_channels": "Каналы проверок",
-    "kmbp_channels": "Каналы КМБП"
+    "kmbp_channels": "Каналы КМБП",
+    "roll_bots": "Ролевые боты"  # Добавлено
 }
 
 RATING_MAP = {1: -5, 2: -2, 3: 0, 4: 2, 5: 5}
@@ -114,16 +116,23 @@ class AccessMiddleware(BaseMiddleware):
         
         return await handler(event, data)
 
-# --- КЛАВИАТУРЫ ---
 def main_kb():
+    # Измени блок с кнопками:
     buttons = [
         [KeyboardButton(text=v) for v in list(CATEGORIES.values())[:2]],
-        [KeyboardButton(text=v) for v in list(CATEGORIES.values())[2:5]],
+        [KeyboardButton(text=v) for v in list(CATEGORIES.values())[2:4]],
+        [KeyboardButton(text=v) for v in list(CATEGORIES.values())[4:]],  # Остальные категории
         [
             KeyboardButton(text="Поиск проекта"),
             KeyboardButton(text="Топ недели"),
             KeyboardButton(text="Топ месяца")
         ],
+        [
+            KeyboardButton(text="Реферальная система"),
+            KeyboardButton(text="Мой прогресс")
+        ]
+    ]
+    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
         [
             KeyboardButton(text="Реферальная система"),
             KeyboardButton(text="Мой прогресс")
