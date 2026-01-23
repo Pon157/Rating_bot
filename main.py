@@ -117,22 +117,15 @@ class AccessMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 def main_kb():
-    # Измени блок с кнопками:
     buttons = [
-        [KeyboardButton(text=v) for v in list(CATEGORIES.values())[:2]],
-        [KeyboardButton(text=v) for v in list(CATEGORIES.values())[2:4]],
+        [KeyboardButton(text=v) for v in list(CATEGORIES.values())[:2]],  # Первые 2 категории
+        [KeyboardButton(text=v) for v in list(CATEGORIES.values())[2:4]], # Следующие 2 категории
         [KeyboardButton(text=v) for v in list(CATEGORIES.values())[4:]],  # Остальные категории
         [
             KeyboardButton(text="Поиск проекта"),
             KeyboardButton(text="Топ недели"),
             KeyboardButton(text="Топ месяца")
         ],
-        [
-            KeyboardButton(text="Реферальная система"),
-            KeyboardButton(text="Мой прогресс")
-        ]
-    ]
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
         [
             KeyboardButton(text="Реферальная система"),
             KeyboardButton(text="Мой прогресс")
